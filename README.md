@@ -1,4 +1,4 @@
-# Claude Account Switcher
+# Switcher for Claude Code
 
 Switch between your Claude accounts in VS Code without going through the
 browser login every time. See every account's 5-hour and weekly limits at a
@@ -14,11 +14,11 @@ whatever credential store the platform provides. See [Security](#security) for d
 
 ## Install
 
-Download `claude-account-switcher-main-<version>.vsix` from the
+Download `switcher-for-claude-code-<version>.vsix` from the
 [latest release](https://github.com/clumsyboss/switcher-for-claude-code/releases), then:
 
 ```powershell
-code --install-extension claude-account-switcher-main-<version>.vsix
+code --install-extension switcher-for-claude-code-<version>.vsix
 ```
 
 Reload VS Code. You should see your Claude account name in the bottom-right
@@ -60,6 +60,7 @@ to its **⋯** menu; click it to see which folders.
 | Refresh everyone's figures | **Update usage** |
 | Rename it, or change its colour or status bar icon | **⋯ → Edit name & icon** |
 | Turn Remote Control off for one account | The **Remote Control** switch on its card |
+| Stop one account from publishing Artifacts | The **Artifacts** switch on its card |
 | Sign in again after a login expires | **Sign in again** on the card (or **⋯ → Sign in again**) |
 | Remove an account from the switcher | **⋯ → Forget account** (your Claude account itself is untouched) |
 | Pin a folder to an account | **Pin a folder…** under Folder pins |
@@ -219,12 +220,29 @@ Known limits:
 - `claude` typed into a plain terminal in a pinned window still uses the
   switcher's account.
 
-## Remote Control per account
+## Remote Control and Artifacts per account
 
 Each card has a **Remote Control** switch. Turning it off for an account sets
 `disableRemoteControl` in `~/.claude/settings.json` whenever that account is
 live, and windows pinned to it get the same through their own `settings.json`.
 Chats already running keep their current connection until they are restarted.
+
+Each card also has an **Artifacts** switch. Turning it off stops Claude Code
+from publishing Artifacts while that account is in use. It works through Claude
+Code's own setting, `enableArtifact` in `~/.claude/settings.json`:
+
+- Switching to an account set to off writes `"enableArtifact": false`;
+  switching to one set to on removes the line again. Windows pinned to an
+  account get its choice in their own `settings.json`.
+- The switcher only ever turns Artifacts **off**. "On" means "as Claude Code
+  would have it": Artifacts appear only where Anthropic offers them to that
+  account, and a managed policy that turns them off still wins.
+- Until some account is set to off, the switcher leaves `enableArtifact` alone,
+  so a choice made in Claude Code's own `/config` is never overwritten.
+- New chats follow the setting. Restart a chat that is already running to be
+  sure it does.
+- If `settings.json` is not valid JSON, it is left untouched and the switch
+  says why.
 
 ## Where your data lives
 
@@ -317,7 +335,7 @@ your platform (`AppData\Roaming\npm\...` on Windows; `~/.local/bin`,
 `which`. Install Claude Code, or put it on `PATH`.
 
 **Anything else** · Run **Claude Accounts: Show Status** and send the output
-from the "Claude Account Switcher" output channel. It contains no token
+from the "Switcher for Claude Code" output channel. It contains no token
 material.
 
 ## Upgrading from an earlier version

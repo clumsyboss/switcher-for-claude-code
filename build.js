@@ -71,7 +71,7 @@ function stage(name, base) {
 }
 
 function pkg(name, dir, version) {
-  const out = path.join(DIST, 'claude-account-switcher-' + name + '-' + version + '.vsix')
+  const out = path.join(DIST, 'switcher-for-claude-code-' + (name === edition.MAIN ? '' : name + '-') + version + '.vsix')
   const r = cp.spawnSync('npx', ['--yes', '@vscode/vsce@latest', 'package',
     '--no-dependencies', '--allow-missing-repository', '--skip-license', '--out', out],
   { cwd: dir, stdio: 'inherit', shell: true })

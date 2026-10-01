@@ -575,9 +575,10 @@ async function main() {
   const ids = Object.keys(registered).map((i) => i.replace('claudeswitcher.', '')).sort()
   check('registers exactly the release set', ids.join(',') === editionLib.MAIN_COMMANDS.slice().sort().join(','), ids.join(','))
   check('and folder pins work in the release too', process.env.CLAUDE_CONFIG_DIR === wdir)
-  check('the release page has no Artifacts switch yet', ext._test.pageState().features.artifacts === false)
+  check('the release page has the Artifacts switch too', ext._test.pageState().features.artifacts === true)
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: false })
-  check('and ignores the action', store.getArtifacts(TEST_ROOT, 'work') === 'on')
+  check('and it works there', store.getArtifacts(TEST_ROOT, 'work') === 'off')
+  await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: true })
   disposeAll(run.c)
   delete process.env.CLAUDE_CONFIG_DIR
   vscode.workspace.workspaceFolders = []

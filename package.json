@@ -1,8 +1,8 @@
 {
   "name": "claude-account-switcher",
-  "displayName": "Claude Account Switcher (Experimental)",
+  "displayName": "Switcher for Claude Code (Experimental)",
   "description": "Switch between Claude accounts in VS Code, see every account's limits, and pin folders to their own account.",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "publisher": "local",
   "private": true,
   "license": "MIT",
@@ -112,7 +112,7 @@
       ]
     },
     "configuration": {
-      "title": "Claude Account Switcher",
+      "title": "Switcher for Claude Code",
       "properties": {
         "claudeswitcher.accountsView": {
           "type": "string",

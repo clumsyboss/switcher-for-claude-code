@@ -11,32 +11,17 @@ its commands are not in the Command Palette, and nothing can call them by id.
 
 ## In testing right now
 
-**Artifacts per account.** Each account's card has an **Artifacts** switch next
-to Remote Control. Turning it off stops Claude Code from publishing Artifacts
-while that account is in use. It works through Claude Code's own setting,
-`enableArtifact` in `~/.claude/settings.json`:
+Nothing right now. The last feature in testing, the per-account Artifacts
+switch, moved into the release in 1.1.0 (see the README).
 
-- Switching to an account set to off writes `"enableArtifact": false`;
-  switching to one set to on removes the line again. Windows pinned to an
-  account get its choice in their own `settings.json`.
-- The switcher only ever turns Artifacts **off**. "On" means "as Claude Code
-  would have it": Artifacts appear only where Anthropic offers them to that
-  account, and a managed policy that turns them off still wins.
-- Until some account is set to off, the switcher leaves `enableArtifact` alone,
-  so a choice made in Claude Code's own `/config` is never overwritten.
-- New chats follow the setting. Restart a chat that is already running to be
-  sure it does.
-- If `settings.json` is not valid JSON, it is left untouched and the switch
-  says why.
-
-To promote it into the release, add `'artifacts'` to `MAIN_FEATURES` in
-[lib/edition.js](../lib/edition.js).
+When something is added, it is listed here with what it does, how to try it,
+and what is known not to work yet.
 
 ## Build and install
 
 ```powershell
 npm run package:experimental
-code --install-extension dist\claude-account-switcher-experimental-<version>.vsix
+code --install-extension dist\switcher-for-claude-code-experimental-<version>.vsix
 ```
 
 Then reload VS Code. It shares an extension id with the release, so installing
@@ -49,8 +34,8 @@ source is always the experimental edition.
 ## Which one am I running?
 
 The experimental build's name in the Extensions view ends in
-**(Experimental)**, its account cards have the Artifacts switch, and **Claude
-Accounts: Show Status** prints the edition on its first line.
+**(Experimental)**, and **Claude Accounts: Show Status** prints the edition on
+its first line.
 
 ## Tests
 

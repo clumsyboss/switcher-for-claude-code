@@ -104,8 +104,8 @@ check('every promoted feature is a known one', edition.MAIN_FEATURES.every((f) =
 check('experimental shows every feature', edition.FEATURES.every((f) => edition.hasFeature(edition.EXPERIMENTAL, f)))
 check('the release shows only promoted ones', edition.FEATURES.every((f) =>
   edition.hasFeature(edition.MAIN, f) === edition.MAIN_FEATURES.includes(f)))
-check('the Artifacts switch is still experimental', edition.hasFeature(edition.EXPERIMENTAL, 'artifacts') &&
-  !edition.hasFeature(edition.MAIN, 'artifacts'))
+check('the Artifacts switch was promoted into the release in 1.1.0', edition.hasFeature(edition.EXPERIMENTAL, 'artifacts') &&
+  edition.hasFeature(edition.MAIN, 'artifacts'))
 check('an unknown feature is off everywhere', !edition.hasFeature(edition.EXPERIMENTAL, 'nope') && !edition.hasFeature(edition.MAIN, 'nope'))
 
 console.log('\n-- a promoted command that package.json forgot is caught --')

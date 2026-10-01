@@ -1208,7 +1208,7 @@ function activate(context) {
   pinState = null
   applyPin()
 
-  output = vscode.window.createOutputChannel('Claude Account Switcher')
+  output = vscode.window.createOutputChannel('Switcher for Claude Code')
   context.subscriptions.push(output)
   if (pinState) {
     log('folder pin: ' + JSON.stringify({ source: pinState.source, name: pinState.name, ready: pinState.ready,
