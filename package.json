@@ -1,0 +1,163 @@
+{
+  "name": "claude-account-switcher",
+  "displayName": "Claude Account Switcher (Experimental)",
+  "description": "Switch between Claude accounts in VS Code, see every account's limits, and pin folders to their own account.",
+  "version": "1.0.2",
+  "publisher": "local",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clumsyboss/switcher-for-claude-code.git"
+  },
+  "claudeswitcher": {
+    "edition": "experimental"
+  },
+  "scripts": {
+    "test": "node test/harness.js && node test/profiles.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js",
+    "stage": "node build.js --no-package",
+    "package": "node build.js",
+    "package:main": "node build.js main",
+    "package:experimental": "node build.js experimental"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "*"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeswitcher.openAccounts",
+        "title": "Claude Accounts: Open Accounts",
+        "category": "Claude Accounts",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "claudeswitcher.globalSwitch",
+        "title": "Claude Accounts: Switch Account",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.globalAdd",
+        "title": "Claude Accounts: Add Account…",
+        "category": "Claude Accounts",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeswitcher.pinFolder",
+        "title": "Claude Accounts: Pin Folder to Account…",
+        "category": "Claude Accounts",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "claudeswitcher.refreshAllAccounts",
+        "title": "Claude Accounts: Update Usage",
+        "category": "Claude Accounts",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeswitcher.showStatus",
+        "title": "Claude Accounts: Show Status",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.switchTo",
+        "title": "Claude Accounts: Switch To Account",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.refreshUsage",
+        "title": "Claude Accounts: Refresh This Window's Usage",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.relogin",
+        "title": "Claude Accounts: Sign In Again…",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.windowLogin",
+        "title": "Claude Accounts: Sign In Window Login…",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeswitcher.openAccountsTab",
+        "title": "Open as a Tab",
+        "category": "Claude Accounts",
+        "icon": "$(link-external)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeAccounts",
+          "title": "Claude Accounts",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeAccounts": [
+        {
+          "type": "webview",
+          "id": "claudeswitcher.accountsView",
+          "name": "Claude Accounts"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Account Switcher",
+      "properties": {
+        "claudeswitcher.accountsView": {
+          "type": "string",
+          "enum": ["tab", "sidebar"],
+          "enumDescriptions": [
+            "Open Accounts opens the page as an editor tab, where files open.",
+            "Open Accounts shows the page in its sidebar view."
+          ],
+          "default": "tab",
+          "scope": "machine",
+          "description": "Where \"Open Accounts\" shows the Claude Accounts page. Both are always available: the sidebar view from its activity-bar icon, the tab from the command."
+        },
+        "claudeswitcher.trackAllAccounts": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show every saved account's 5-hour and weekly usage, renewing saved logins in the background so the figures stay live. Turn off to stop all background renewals and usage checks."
+        },
+        "claudeswitcher.usageIcon": {
+          "type": "string",
+          "default": "pulse",
+          "scope": "machine",
+          "description": "Codicon id for the usage meter, without the $() wrapper. Account icons are set on the Claude Accounts page."
+        },
+        "claudeswitcher.root": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Where the switcher keeps its saved accounts. Defaults to ~/.claude-switcher"
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        { "command": "claudeswitcher.switchTo", "when": "false" },
+        { "command": "claudeswitcher.refreshUsage", "when": "false" },
+        { "command": "claudeswitcher.relogin", "when": "false" },
+        { "command": "claudeswitcher.windowLogin", "when": "false" },
+        { "command": "claudeswitcher.openAccountsTab", "when": "false" }
+      ],
+      "view/title": [
+        { "command": "claudeswitcher.refreshAllAccounts", "when": "view == claudeswitcher.accountsView", "group": "navigation@1" },
+        { "command": "claudeswitcher.globalAdd", "when": "view == claudeswitcher.accountsView", "group": "navigation@2" },
+        { "command": "claudeswitcher.openAccountsTab", "when": "view == claudeswitcher.accountsView", "group": "navigation@3" }
+      ]
+    }
+  }
+}
