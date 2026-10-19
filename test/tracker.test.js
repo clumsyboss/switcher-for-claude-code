@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const fs = require('fs')
 const os = require('os')
@@ -14,6 +16,7 @@ const locks = require('../lib/locks.js')
 const oauth = require('../lib/oauth.js')
 const usage = require('../lib/usage.js')
 const store = require('../lib/store.js')
+const credstore = require('../lib/credstore.js')
 
 let passed = 0
 let failed = 0
@@ -37,10 +40,10 @@ const tokenOk = (n, extra) => ({ status: 200, body: JSON.stringify({ access_toke
 const H = 3600e3
 function signIn(email, uuid, tag, expiresInMs) {
   fs.mkdirSync(path.join(HOME, '.claude'), { recursive: true })
-  fs.writeFileSync(path.join(HOME, '.claude', '.credentials.json'), JSON.stringify({
+  credstore.write(null, {
     claudeAiOauth: { accessToken: 'AT-' + tag, refreshToken: 'RT-' + tag, expiresAt: Date.now() + expiresInMs,
       scopes: oauth.SCOPES, subscriptionType: 'max', rateLimitTier: 'tier' },
-  }))
+  })
   const cfgPath = path.join(HOME, '.claude.json')
   const prev = fs.existsSync(cfgPath) ? JSON.parse(fs.readFileSync(cfgPath, 'utf8')) : {}
   fs.writeFileSync(cfgPath, JSON.stringify({ ...prev, oauthAccount: { emailAddress: email, accountUuid: uuid, organizationName: 'Acme' } }))
@@ -100,7 +103,7 @@ async function main() {
   r = await tracker.renew(ROOT, 'alpha', { force: true })
   check('unknown live identity means no renewals at all', r.skipped === 'live' && calls.refresh.length === 0, JSON.stringify(r))
   fs.writeFileSync(cfgPath, cfgGood)
-  const liveCreds = JSON.parse(fs.readFileSync(path.join(HOME, '.claude', '.credentials.json'), 'utf8'))
+  const liveCreds = credstore.read(null)
   const alphaPayload = profiles.readPayload(ROOT, 'alpha')
   profiles.updateCredentials(ROOT, 'alpha', { ...alphaPayload.credentials,
     claudeAiOauth: { ...alphaPayload.credentials.claudeAiOauth, refreshToken: liveCreds.claudeAiOauth.refreshToken } })
@@ -146,6 +149,28 @@ async function main() {
   check('and a late release never removes someone else\'s lock', fs.readFileSync(lockFile, 'utf8') === 'someone-else')
   fs.rmSync(lockFile)
 
+  const COUNTER = path.join(ROOT, 'counter')
+  fs.writeFileSync(COUNTER, '0')
+  const ROUNDS = 60
+  const kids = [0, 1, 2, 3].map(() => require('child_process').spawn(process.execPath, ['-e',
+    'const fs = require("fs"); const locks = require(' + JSON.stringify(path.join(__dirname, '..', 'lib', 'locks.js')) + ');' +
+    'const fsx = require(' + JSON.stringify(path.join(__dirname, '..', 'lib', 'fsx.js')) + '); let done = 0, missed = 0;' +
+    'for (let i = 0; i < ' + ROUNDS + '; i++) {' +
+    '  const release = locks.acquireSync(' + JSON.stringify(ROOT) + ', "busy", { staleMs: 10000, waitMs: 6000 });' +
+    '  if (!release) { missed++; continue }' +
+    '  const n = Number(fs.readFileSync(' + JSON.stringify(COUNTER) + ', "utf8")); fsx.sleepSync(Math.random() * 2);' +
+    '  fs.writeFileSync(' + JSON.stringify(COUNTER) + ', String(n + 1)); done++; release() }' +
+    'console.log(JSON.stringify({ done, missed }))'], { stdio: ['ignore', 'pipe', 'pipe'] }))
+  let kidOut = ''
+  let kidErr = ''
+  kids.forEach((k) => { k.stdout.on('data', (d) => (kidOut += d)); k.stderr.on('data', (d) => (kidErr += d)) })
+  await Promise.all(kids.map((k) => new Promise((r) => k.on('exit', r))))
+  const tallies = kidOut.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const doneAll = tallies.reduce((a, t) => a + t.done, 0)
+  check('four windows taking one lock at once: never two holders', tallies.length === 4 && !kidErr &&
+    Number(fs.readFileSync(COUNTER, 'utf8')) === doneAll, fs.readFileSync(COUNTER, 'utf8') + ' of ' + doneAll + ' ' + kidErr.slice(0, 200))
+  check('and nobody is left waiting for a lock that was released', tallies.every((t) => t.missed === 0), JSON.stringify(tallies))
+
   console.log('\n-- RULE 3: the new token is kept --')
   reset()
   refreshReply = { status: 200, body: JSON.stringify({ access_token: 'AT-A4', expires_in: 28800 }) }
@@ -172,12 +197,12 @@ async function main() {
   r = await tracker.renew(ROOT, 'alpha', { force: true })
   check('and is never retried', r.skipped === 'needs-login' && calls.refresh.length === 0)
   check('a 401 counts as rejected too', oauth.interpret({ status: 401, body: '{}' }, {}).rejected === true)
-  const liveBackup = fs.readFileSync(path.join(HOME, '.claude', '.credentials.json'))
+  const liveBackup = credstore.read(null)
   const cfgBackup = fs.readFileSync(cfgPath)
   signIn('a@example.com', 'uuid-a', 'A9', 8 * H)
   profiles.capture(ROOT, 'alpha')
   check('signing in again clears the mark', !meta('alpha').needsLogin)
-  fs.writeFileSync(path.join(HOME, '.claude', '.credentials.json'), liveBackup)
+  credstore.write(null, liveBackup)
   fs.writeFileSync(cfgPath, cfgBackup)
 
   console.log('\n-- RULE 5: polling usage --')
@@ -254,6 +279,26 @@ async function main() {
   check('and still honours a rate-limit pause',
     clicked.some((x) => x.name === 'gamma' && x.skipped === 'paused') || usage.pausedUntil(ROOT, 'uuid-c') <= Date.now())
   check('no step throws', res.every((x) => !(x.failed === 'error')), JSON.stringify(res.filter((x) => x.failed === 'error')))
+
+  if (process.platform !== 'win32' && !(process.getuid && process.getuid() === 0)) {
+    console.log('\n-- a renewed login that can\'t be saved is kept, not lost (M1) --')
+    signIn('rescue@example.com', 'uuid-r', 'R1', 30 * 60e3)
+    profiles.capture(ROOT, 'rescue')
+    signIn('other@example.com', 'uuid-o', 'O1', 8 * H)
+    refreshReply = tokenOk('R2')
+    const pdir = profiles.profilesDir(ROOT)
+    fs.chmodSync(pdir, 0o500)
+    let r
+    try { r = await tracker.renew(ROOT, 'rescue', { force: true }) } finally { fs.chmodSync(pdir, 0o700) }
+    check('the renewal says the save failed', r && r.failed === 'save', JSON.stringify(r))
+    check('the saved copy still holds the old token (dead at the server now)', saved('rescue').refreshToken === 'RT-R1')
+    check('but the renewed one is kept for recovery', fs.readdirSync(path.join(ROOT, 'recovery')).length === 1)
+    reset()
+    await tracker.tick(ROOT, {})
+    check('and the next round saves it', saved('rescue').refreshToken === 'RT-R2', saved('rescue').refreshToken)
+    check('without using the dead token again', !calls.refresh.includes('RT-R1'), JSON.stringify(calls.refresh))
+    check('and clears the recovery copy', fs.readdirSync(path.join(ROOT, 'recovery')).length === 0)
+  }
 }
 
 main()

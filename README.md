@@ -51,13 +51,17 @@ Palette (`Ctrl+Shift+P`).
 One card per saved account: its email, its 5-hour and weekly use with when each
 resets, and everything you can do with it. The live account is the one with
 the green outline. An account with pinned folders shows a pin and a count next
-to its **⋯** menu; click it to see which folders.
+to its **⋯** menu; click it to see which folders. Behind the bottom of each
+card, a faint grid of squares fills up with the context of that account's most
+recent chat (see [Chat context](#chat-context)).
 
 | I want to… | On the page |
 |---|---|
 | Switch account | **Switch** on its card |
 | Add an account | **Add account** |
 | Refresh everyone's figures | **Update usage** |
+| Start an account's 5-hour window now, without switching to it | **▶** on its card |
+| Take an account to another PC | **⋯ → Make a login for another PC…** |
 | Rename it, or change its colour or status bar icon | **⋯ → Edit name & icon** |
 | Turn Remote Control off for one account | The **Remote Control** switch on its card |
 | Stop one account from publishing Artifacts | The **Artifacts** switch on its card |
@@ -81,6 +85,8 @@ extension, which checks it before doing anything.
 |---|---|
 | See which account is live | Look at the bottom right |
 | Switch account for every window that isn't pinned | Click the account name |
+| See how full this window's chat is | Look at the dots between the name and the percentages |
+| See my other chats | Hover the dots |
 | See my limits | Look at the three percentages |
 | See every account's limits | Hover the percentages |
 | Update every account now | Click the percentages |
@@ -117,7 +123,8 @@ weekly Fable limit as a percentage. The tick marks the account this window uses.
 
 Click a name to switch to that account globally (pinned folders are unaffected).
 "(reset)" means that limit has reset since the figure was taken, so 0% is the
-real number now.
+real number now. The **▶** next to an account that isn't live starts its 5-hour
+session (see [Starting a 5-hour session early](#starting-a-5-hour-session-early)).
 
 **How the figures stay live.** A saved account's login expires 8 hours after it
 was last renewed. To keep reading usage for accounts you are not using, the
@@ -179,7 +186,9 @@ window shows **📌 account** in the status bar; clicking it manages the pin.
 
 Unpinning keeps the window login, so pinning the folder again later needs no
 sign-in. To remove a window login, use **⋯ → Forget window login** on the
-account's card.
+account's card. Its login is deleted; anything else in its folder that was
+that account's own (a `CLAUDE.md`, settings made in that window) is moved to
+`~/.claude-switcher/backups/` rather than deleted.
 
 How it works:
 
@@ -188,7 +197,8 @@ How it works:
 ~/.claude-switcher/windows/<name>/  used only by windows pinned to <name>
     .credentials.json   its window login: its own session, never the switcher's saved copy
     .claude.json        its identity, seeded once with your project trust and MCP servers
-    settings.json       a copy of ~/.claude/settings.json, with this account's Remote Control choice
+    settings.json       a copy of ~/.claude/settings.json, with this account's Remote Control choice;
+                        anything you change inside that window (/model, /permissions…) is kept
     projects/ sessions/ file-history/ tasks/ todos/ plans/ agents/ commands/
                         links into ~/.claude (junctions on Windows, symlinks elsewhere)
 ```
@@ -226,6 +236,8 @@ Each card has a **Remote Control** switch. Turning it off for an account sets
 `disableRemoteControl` in `~/.claude/settings.json` whenever that account is
 live, and windows pinned to it get the same through their own `settings.json`.
 Chats already running keep their current connection until they are restarted.
+Until some account is set to off, the switcher leaves `disableRemoteControl`
+alone, so a value you set by hand stays as you set it.
 
 Each card also has an **Artifacts** switch. Turning it off stops Claude Code
 from publishing Artifacts while that account is in use. It works through Claude
@@ -243,6 +255,58 @@ Code's own setting, `enableArtifact` in `~/.claude/settings.json`:
   sure it does.
 - If `settings.json` is not valid JSON, it is left untouched and the switch
   says why.
+
+## Chat context
+
+How full a chat's context is, read from Claude Code's own chat files.
+
+- **In the status bar**, between the account name and the usage meter: this
+  window's chat as a row of dots. The dots fill up as the context does, and the
+  dim ones show the room left. Green, then yellow from 80%, red from 95%.
+- **Hover the dots** for your other recent chats: each one's name, with its own
+  dots below it. This window's chat is drawn larger.
+- **On each card**, a faint grid behind the bottom shows that account's most
+  recent chat. A chat counts for the account that was live when it was last
+  used, or for the account its folder is pinned to. A card stays empty until
+  one of its chats has been used.
+- **While a chat is compacting**, its dots fill and empty and its grids
+  shimmer. The new size shows as soon as the compaction finishes.
+
+The figure is what the chat's last reply used. The context limit is worked out
+from what each model has been seen to hold: 1M tokens for a model that has
+gone past 200k, otherwise 200k.
+
+## Starting a 5-hour session early
+
+An account's 5-hour window opens with its first message. **▶** on its card,
+or next to it in the usage hover, says "hi" to Claude as that account without
+switching to it, so the window starts now and resets sooner.
+
+- It runs Claude Code in the background with the cheapest model, no tools, a
+  one-line system prompt and nothing saved. It costs a sliver of the allowance,
+  and no chat appears anywhere.
+- It uses the account's saved login in a throwaway folder that is deleted
+  straight after. If Claude Code renews the login during the run, the renewed
+  one is saved back.
+- It isn't offered for the live account (your next message starts that one),
+  for a login that has expired, or while a session is already running. There
+  the button is dimmed and says when the session resets.
+
+## A login for another PC
+
+**⋯ → Make a login for another PC…** signs the account in once more, as a
+separate login, and seals that login into a file protected by a passphrase you
+choose (at least 12 characters).
+
+- Nothing changes on this PC. Its own login for the account is untouched, and
+  the two never share a refresh token, so they can't sign each other out.
+- The browser has to sign in as that same account. Anything else is discarded.
+- The new login goes straight into the file and is never saved here. Its
+  sign-in folder is deleted afterwards.
+- A login lasts about four weeks from when it is made, even while it sits in
+  the file, so make it shortly before you need it.
+
+The Accounts page can't import the file yet. That is coming in a later version.
 
 ## Where your data lives
 
@@ -297,7 +361,9 @@ not installed.
 **Profiles do not travel between machines.** That is the point of tying them to
 the OS store, and a refresh token is replaced each time it is used, so a copy
 would stop working anyway. To use an account on a second machine, add it there
-and sign in again.
+and sign in again, or make it a separate login with
+[A login for another PC](#a-login-for-another-pc). That file is sealed with
+your passphrase (scrypt and AES-256-GCM), not with this machine's store.
 
 ## Troubleshooting
 
@@ -340,6 +406,26 @@ material.
 
 ## Upgrading from an earlier version
 
+### From 1.1
+
+Installing 1.2.0 upgrades it in place, and everything carries over. What
+changes:
+
+- **Switching is safer.** A switch refuses to save one account's login under
+  another's name, aborts without changing anything if `~/.claude.json` can't be
+  read, and puts the previous login back if it fails part-way. A saved login is
+  backed up to `~/.claude-switcher/backups/` before it is replaced.
+- **`registry.json` is never written over while it has an error.** The page and
+  the status bar hover say what is wrong, and `registry.json.bak` holds the
+  previous good copy.
+- **Your files keep their permissions and links.** A `~/.claude.json` or
+  `settings.json` that is a link stays a link. If other users can read them,
+  **Show Status** offers to fix that; nothing is changed without asking.
+- **A `disableRemoteControl` you set by hand is left alone** until some account
+  has Remote Control switched off.
+
+### From 1.0
+
 The old command list is folded into the Accounts page. Renaming, icons, Remote
 Control, sign-in-again and removing an account are now on each account's card.
 Removed:
@@ -350,8 +436,8 @@ Removed:
 - **Per-window and machine-wide modes**, **Open New Window as Account**, **New
   Terminal as Account** and **New Chat as Account**. Folder pins replace them.
   A machine left in one of the old modes is put back on the switcher the first
-  time the new version starts, and any machine-wide `CLAUDE_CONFIG_DIR` they
-  set is cleared.
+  time the new version starts. A machine-wide `CLAUDE_CONFIG_DIR` they set is
+  cleared only if you agree when asked; the answer is remembered.
 
 Your saved accounts, names, icons, pins and window logins carry over as they
 are.
@@ -374,7 +460,7 @@ installing one replaces the other, so you can never end up with two status bars
 fighting over the same account store.
 
 ```powershell
-npm test              # 543 tests, no network, no touching your real ~/.claude
+npm test              # 733 tests, no network, no touching your real ~/.claude
 npm run stage         # build both editions into dist/ without packaging
 npm run package       # both .vsix files into dist/
 npm run package:main  # just the release

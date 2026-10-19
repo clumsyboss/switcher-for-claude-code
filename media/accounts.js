@@ -48,6 +48,8 @@
     alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
     window: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    play: '<path d="M7 4v16l13-8Z"/>',
+    pc: '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m9 10 3-3 3 3"/><path d="M12 7v6"/>',
     check: '<path d="M20 6 9 17l-5-5"/>',
   }
   function icon(name, cls) {
@@ -56,7 +58,7 @@
     return span.firstChild
   }
   function codicon(name) {
-    if (!HAS_FONT || !ICONS[name]) return null
+    if (!HAS_FONT || typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(ICONS, name)) return null
     const codes = Array.isArray(ICONS[name]) ? ICONS[name] : [ICONS[name]]
     return h('span', { class: 'codicon' + (codes.length > 1 ? ' pair' : ''), 'aria-hidden': 'true',
       text: codes.map((c) => String.fromCodePoint(c)).join('') })
@@ -75,7 +77,7 @@
   const AUTO = ['blue', 'purple', 'green', 'orange', 'yellow', 'red']
   function autoColor(name) {
     let x = 0
-    for (const c of name) x = (x * 31 + c.charCodeAt(0)) >>> 0
+    for (const c of String(name)) x = (x * 31 + c.charCodeAt(0)) >>> 0
     return AUTO[x % AUTO.length]
   }
   function hueOf(a) { return COLORS[(a.color && COLORS[a.color]) ? a.color : autoColor(a.name)][1] }
@@ -86,6 +88,12 @@
   function avatar(a, cls) {
     return h('div', { class: cls, 'aria-hidden': 'true', style: { '--hue': hueOf(a) } },
       codicon(a.icon) || initials(a.label))
+  }
+
+  function ctxShade(k, filled) {
+    const r = Math.abs((Math.sin(k * 12.9898) * 43758.5453) % 1)
+    const v = (k / Math.max(1, filled)) * 0.75 + r * 0.4
+    return v > 0.95 ? 3 : v > 0.7 ? 2 : v > 0.4 ? 1 : 0
   }
 
   function now() { return state ? state.now + (Date.now() - receivedAt) : Date.now() }
@@ -108,7 +116,7 @@
 
   function send(type, data, key) {
     lastJson = ''
-    if (key) { busy.add(key); render() }
+    if (key) { busy.add(key); renderSafely() }
     vscode.postMessage(Object.assign({ type }, data || {}))
   }
 
@@ -175,6 +183,9 @@
     return h('div', { class: 'menu', role: 'menu', 'aria-label': 'Actions for ' + a.label, tabindex: '-1' },
       item('edit', 'Edit name & icon', () => openEdit(a)),
       item('login', 'Sign in again', () => send('relogin', { name: a.name })),
+      state.features && state.features.spareLogin
+        ? item('pc', 'Make a login for another PC…', () => send('spareLogin', { name: a.name }))
+        : null,
       h('hr'),
       h('div', { class: 'hint', text: wl && wl.signedIn
         ? 'Window login: signed in' + (wl.email ? ' as ' + wl.email : '')
@@ -237,10 +248,38 @@
         onclick: (e) => { e.stopPropagation(); toggleMenu('pins', a.name, e.currentTarget, e) } },
       icon('pin', 'sm'), String(pins.length))
       : null
+    const running = !!(a.session && !a.session.resetSince && a.session.resetsAt && Date.parse(a.session.resetsAt) > now())
+    const startBtn = s.features && s.features.startSession && !a.active && !a.needsLogin
+      ? h('button', { class: 'icon-btn start', disabled: running || a.starting || null,
+        title: a.starting ? 'Starting a 5-hour session…'
+          : running ? 'Session running · resets in ' + (until(Date.parse(a.session.resetsAt)) || 'a moment') : 'Start a 5-hour session',
+        'aria-label': (running ? '5-hour session running for ' : 'Start a 5-hour session for ') + a.label,
+        onclick: () => send('startSession', { name: a.name }) },
+      icon(a.starting ? 'refresh' : 'play', a.starting ? 'sm spin' : 'sm'))
+      : null
     const moreBtn = h('button', { class: 'icon-btn', 'data-menu': 'actions:' + a.name, title: 'More actions',
       'aria-label': 'More actions for ' + a.label, 'aria-haspopup': 'menu', 'aria-expanded': 'false',
       onclick: (e) => { e.stopPropagation(); toggleMenu('actions', a.name, e.currentTarget, e) } }, icon('kebab'))
 
+    let ctxGrid = null
+    if (s.features && s.features.context) {
+      const cols = 30
+      const rows = 3
+      const pct = a.context ? a.context.pct : 0
+      const filled = Math.round((cols * rows * pct) / 100)
+      const hot = pct >= 95 ? ' bad' : pct >= 80 ? ' warn' : ''
+      const shuffle = !!(a.context && a.context.compacting)
+      ctxGrid = h('div', { class: 'ctx' + hot + (shuffle ? ' shuffle' : ''), 'aria-hidden': 'true',
+        title: shuffle ? 'Compacting…' : a.context ? 'Context ' + pct + '%' : 'No recent chat on this account' })
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const order = (rows - 1 - r) * cols + c
+          const cell = h('i', { class: order < filled ? 'on s' + ctxShade(order, filled) : null })
+          if (shuffle) cell.style.setProperty('animation-delay', (-(Math.abs(Math.sin(order * 78.233) * 43758.5453) % 1) * 1.6).toFixed(2) + 's')
+          ctxGrid.append(cell)
+        }
+      }
+    }
     const justLive = a.active && rendered && lastLive !== null && lastLive !== a.name
     return h('article', { class: 'card' + (a.active ? ' live' : '') + (justLive ? ' just-live' : ''),
       'aria-label': a.label + (a.active ? ' (live account)' : '') },
@@ -248,7 +287,8 @@
         h('div', { class: 'ident' },
           h('div', { class: 'name', text: a.label }),
           h('div', { class: 'sub', text: [a.email, a.org].filter(Boolean).join(' · ') || a.name })),
-        h('div', { class: 'head-actions' }, pinBtn, moreBtn)),
+        h('div', { class: 'head-actions' }, startBtn, pinBtn, moreBtn)),
+      ctxGrid,
       a.needsLogin
         ? h('div', { class: 'alert', role: 'status' }, icon('alert', 'sm'),
           h('div', { class: 'grow', text: 'This saved login has expired.' }),
@@ -274,6 +314,18 @@
 
   function banner() {
     const s = state
+    if (s.registryError) {
+      return h('div', { class: 'banner warn' }, icon('alert'),
+        h('div', { class: 'grow' }, h('strong', { text: 'The settings file has an error' }),
+          h('div', { class: 'muted', text: s.registryError })),
+        h('button', { class: 'btn primary sm', onclick: () => send('openConfig') }, 'Open it'))
+    }
+    if (s.duplicates && s.duplicates.length) {
+      const g = s.duplicates[0]
+      return h('div', { class: 'banner warn' }, icon('alert'),
+        h('div', { class: 'grow' }, h('strong', { text: g.join(' and ') + ' are the same account' }),
+          h('div', { class: 'muted', text: 'Each holds its own login, and only one stays current. Keep one, and use ⋯ → Forget account on the others.' })))
+    }
     if (s.live && !s.live.saved && s.live.email) {
       return h('div', { class: 'banner warn' }, icon('alert'),
         h('div', { class: 'grow' }, h('strong', { text: 'Your current login isn’t saved yet' }),
@@ -380,7 +432,7 @@
     dialog = null
     d.classList.add('closing')
     setTimeout(() => d.remove(), 120)
-    if (state) render()
+    if (state) renderSafely()
   }
 
   function render() {
@@ -470,8 +522,18 @@
     lastJson = json
     busy.clear()
     if (same) { tick(); return }
-    if (!dialog) render()
+    if (!dialog) renderSafely()
   })
+
+  function renderSafely() {
+    try { render() } catch (err) {
+      app.replaceChildren(h('div', { class: 'banner warn' }, icon('alert'),
+        h('div', { class: 'grow' }, h('strong', { text: 'This page couldn’t be drawn' }),
+          h('div', { class: 'muted', text: String((err && err.message) || err) })),
+        h('button', { class: 'btn primary sm', onclick: () => send('openConfig') }, 'Open Settings File'),
+        h('button', { class: 'btn ghost sm', onclick: () => send('status') }, 'Show Status')))
+    }
+  }
 
   vscode.postMessage({ type: 'ready' })
 })()

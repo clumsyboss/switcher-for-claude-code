@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const { interpret, retryAfterMs } = require('../lib/live.js')
 

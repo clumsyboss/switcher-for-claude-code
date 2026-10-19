@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const cp = require('child_process')
 const crypto = require('crypto')
@@ -17,6 +19,7 @@ const OPTS = { home: HOME }
 const items = new Map()
 const argvLog = []
 let locked = false
+let beforeAdd = null
 
 const NOT_FOUND = 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n'
 const NO_UI = 'security: SecKeychainSearchCopyNext: User interaction is not allowed.\n'
@@ -48,6 +51,7 @@ function exec(args) {
     }
   }
   if (cmd === 'add-generic-password') {
+    if (beforeAdd) { const f = beforeAdd; beforeAdd = null; f(key) }
     if (items.has(key) && !args.includes('-U')) return { status: 45, stdout: '', stderr: 'already exists\n' }
     const hex = opt(args, '-X')
     const value = hex !== undefined ? Buffer.from(hex, 'hex').toString('utf8') : opt(args, '-w')
@@ -129,9 +133,9 @@ try {
     credstore.account({ env: { USER: 'some one' } }) === 'claude-code-user')
   check('hash input is NFC-normalised', credstore.service('/Users/cafe\u0301', OPTS) === credstore.service('/Users/caf\u00e9', OPTS))
   check('CLAUDE_SECURESTORAGE_CONFIG_DIR overrides, as in Claude Code',
-    credstore.service(dirW, { ...OPTS, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/x' } }) === CC_DEFAULT + '-' + sha8('/x'))
+    credstore.service(null, { ...OPTS, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/x' } }) === CC_DEFAULT + '-' + sha8('/x'))
   check('an empty override means the default item',
-    credstore.service(dirW, { ...OPTS, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '' } }) === CC_DEFAULT)
+    credstore.service(null, { ...OPTS, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '' } }) === CC_DEFAULT)
 
   console.log('\n-- adding an account: Claude Code signs in to the account folder --')
   store.addAccount(ROOT, 'work')
@@ -195,14 +199,52 @@ try {
   const keyItems = () => [...items.keys()].filter((k) => k.startsWith('claude-account-switcher\0'))
   check('exactly one key item', keyItems().length === 1, keyItems().join(','))
   const keyBefore = items.get(keyItems()[0]).value
-  profiles.capture(ROOT, 'again', OPTS)
+  profiles.capture(ROOT, 'work', OPTS)
   check('reused, never regenerated', keyItems().length === 1 && items.get(keyItems()[0]).value === keyBefore)
-  check('profiles are AES-sealed', secrets.isAesBlob(fs.readFileSync(path.join(ROOT, 'profiles', 'again.enc'))))
+  check('profiles are AES-sealed', secrets.isAesBlob(fs.readFileSync(path.join(ROOT, 'profiles', 'work.enc'))))
   locked = true
   secrets._test.reset()
   check('a locked Keychain never mints a replacement key',
     throws(() => secrets.protect(Buffer.from('x'))) && items.get(keyItems()[0]).value === keyBefore)
   locked = false
+
+  console.log('\n-- a new key is never made over saved accounts (audit #8) --')
+  const kc = require('../lib/keychain.js')
+  check('"keychain could not be found" (50) is no keychain, not "no item"',
+    kc.classify({ status: 50, stderr: 'security: SecKeychainSearchCopyNext: The specified keychain could not be found.' }) === 'no-keychain')
+  check('a missing default keychain (37) too', kc.classify({ status: 37, stderr: 'A default keychain could not be found.' }) === 'no-keychain')
+  check('a create-only add that finds an item is "duplicate"', kc.classify({ status: 45, stderr: '' }) === 'duplicate')
+  check('without an exit code, the wording is read most-specific first',
+    kc.classify({ status: null, stderr: 'The specified keychain could not be found.' }) === 'no-keychain' &&
+    kc.classify({ status: null, stderr: 'The specified item could not be found in the keychain.' }) === 'absent')
+
+  secrets.addGuardRoot(ROOT)
+  const keyKey = keyItems()[0]
+  const savedKey = items.get(keyKey)
+  items.delete(keyKey)
+  secrets._test.reset()
+  check('with sealed accounts on disk, a missing key is not replaced',
+    throws(() => secrets.protect(Buffer.from('x')), /unreadable for good/) && keyItems().length === 0)
+  items.set(keyKey, { value: 'c2hvcnQ=', mdat: Date.now() })
+  secrets._test.reset()
+  check('a damaged key is reported, and left as it is',
+    throws(() => secrets.protect(Buffer.from('x')), /damaged/) && items.get(keyKey).value === 'c2hvcnQ=')
+  items.set(keyKey, savedKey)
+  secrets._test.reset()
+  check('with the key back, the saved accounts open again', profiles.readPayload(ROOT, 'work').credentials.claudeAiOauth.refreshToken.length > 0)
+
+  items.delete(keyKey)
+  secrets._test.reset()
+  const theirs = require('crypto').randomBytes(32).toString('base64')
+  beforeAdd = (k) => { if (k === keyKey) items.set(k, { value: theirs, mdat: Date.now() }) }
+  fs.renameSync(path.join(ROOT, 'profiles'), path.join(ROOT, 'profiles-aside'))
+  let mine = null
+  try { mine = secrets.masterKey() } catch (e) { mine = e }
+  fs.renameSync(path.join(ROOT, 'profiles-aside'), path.join(ROOT, 'profiles'))
+  check('a key made by another window a moment earlier is used, not overwritten',
+    Buffer.isBuffer(mine) && mine.toString('base64') === theirs && items.get(keyKey).value === theirs, String(mine && mine.message))
+  items.set(keyKey, savedKey)
+  secrets._test.reset()
 
   console.log('\n-- forgetting an account removes its Keychain item --')
   store.addAccount(ROOT, 'temp')
@@ -216,10 +258,25 @@ try {
   fs.writeFileSync(path.join(ROOT, 'profiles', 'fromwin.enc'), Buffer.from('AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA', 'base64'))
   check('refused with a plain explanation', throws(() => profiles.apply(ROOT, 'fromwin', OPTS), /encrypted on Windows/))
 
+  console.log('\n-- CLAUDE_SECURESTORAGE_CONFIG_DIR (M2) --')
+  const SSD = { env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/shared/store', USER: 'someone' }, home: HOME }
+  const kdir = path.join(ROOT, 'kickoff', 'work-1-x')
+  check('the live login still follows it, as Claude Code does', credstore.service(null, SSD) === 'Claude Code-credentials-' + sha8('/shared/store'))
+  check('an isolated folder keeps its own login instead of the live one',
+    credstore.service(kdir, SSD) !== credstore.service(null, SSD) && credstore.service(kdir, SSD) === 'Claude Code-credentials-' + sha8(kdir))
+  check('a value a pinned window set aside still applies to the live login',
+    credstore.service(null, { env: { CLAUDESWITCHER_SECURESTORAGE_CONFIG_DIR: '/shared/store', USER: 'someone' }, home: HOME }) ===
+      'Claude Code-credentials-' + sha8('/shared/store'))
+  const claudeLib = require('../lib/claude.js')
+  process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = '/shared/store'
+  const childEnv = claudeLib.envFor(kdir)
+  delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+  check('and claude runs there without it, so the two agree', childEnv.CLAUDE_CONFIG_DIR === kdir && !('CLAUDE_SECURESTORAGE_CONFIG_DIR' in childEnv))
+
   console.log('\n-- the terminal command zsh will actually receive --')
   const { invoke } = require('../lib/shell.js')
   const line = invoke('/Users/someone/.local/bin/claude', ['auth', 'login'])
-  check("no leading '&' (the first reported error)", line === "'/Users/someone/.local/bin/claude' auth login", line)
+  check("no leading '&' (the first reported error)", line === "'/Users/someone/.local/bin/claude' 'auth' 'login'", line)
   const sh = ['/bin/sh', 'C:\\Program Files\\Git\\bin\\sh.exe'].find((p) => fs.existsSync(p))
   if (sh) {
     const probe = invoke("/tmp/it's a path/echo-args", ['auth', 'login'])
@@ -229,7 +286,7 @@ try {
     check('skipped: no POSIX shell on this machine', true)
   }
 } finally {
-  keychain._test.setRunner(null)
+  require('./fake-security').install()
   cp.execFileSync = realExecFileSync
   Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
   if (realUser === undefined) delete process.env.USER; else process.env.USER = realUser

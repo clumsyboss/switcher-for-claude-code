@@ -11,11 +11,10 @@ its commands are not in the Command Palette, and nothing can call them by id.
 
 ## In testing right now
 
-Nothing right now. The last feature in testing, the per-account Artifacts
-switch, moved into the release in 1.1.0 (see the README).
-
-When something is added, it is listed here with what it does, how to try it,
-and what is known not to work yet.
+Nothing at the moment. The last three features in testing moved into the
+release in 1.2.0: **a login for another PC**, **▶ start a 5-hour session** and
+**chat context**. The README describes them. The per-account Artifacts switch
+moved in 1.1.0.
 
 ## Build and install
 

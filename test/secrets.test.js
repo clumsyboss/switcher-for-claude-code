@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -122,6 +124,18 @@ console.log('\n-- profiles.js goes through it --')
   check('profiles.js uses the platform-neutral module', /secrets\.(protect|unprotect)\(/.test(src))
 }
 
+console.log('\n-- the login terminal runs claude itself, with no shell --')
+{
+  const sh = require('../lib/shell.js')
+  const spec = sh.terminalSpec('/Users/me/.local/bin/claude', ['auth', 'login', '--email', 'x@y.co'], 'darwin')
+  check('claude is the terminal\'s process', spec.shellPath === '/Users/me/.local/bin/claude')
+  check('and its arguments are passed as a list', JSON.stringify(spec.shellArgs) === '["auth","login","--email","x@y.co"]')
+  const cmd = sh.terminalSpec('C:\\npm\\claude.cmd', ['auth', 'login'], 'win32')
+  check('a Windows npm shim is started through cmd.exe', cmd.shellPath === 'cmd.exe' && cmd.shellArgs.join(' ') === '/d /c C:\\npm\\claude.cmd auth login')
+  check('plain emails are pre-filled', ['dev@example.com', "o'brien@acme.co.uk", 'a+b@x.io'].every(sh.validEmail))
+  check('anything shell-like is not', ['a@b.co; rm -rf ~', 'a@b.co $(id)', 'a b@c.co', 'x@y.co`id`', 'a@b', '', null, 'a@b.co\n'].every((e) => !sh.validEmail(e)))
+}
+
 console.log('\n-- shell quoting, both shells, from either platform --')
 {
   const inv = require('../lib/shell.js').invoke
@@ -130,16 +144,20 @@ console.log('\n-- shell quoting, both shells, from either platform --')
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
     check('PowerShell gets the call operator',
       inv('C:\\Program Files\\claude.exe', ['auth', 'login']) ===
-        "& 'C:\\Program Files\\claude.exe' auth login")
+        "& 'C:\\Program Files\\claude.exe' 'auth' 'login'")
 
     Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
     const out = inv('/Users/someone/.local/bin/claude', ['auth', 'login'])
     check('zsh gets no leading &, which is what broke on the Mac',
-      out === "'/Users/someone/.local/bin/claude' auth login")
+      out === "'/Users/someone/.local/bin/claude' 'auth' 'login'")
     check('no & anywhere in the POSIX form', !out.includes('&'))
     check('a quote in the path is escaped the POSIX way',
       inv("/Users/o'brien/claude", []) === "'/Users/o'\\''brien/claude'")
     check('no args means no trailing space', inv('/usr/local/bin/claude', []) === "'/usr/local/bin/claude'")
+    check('every argument is quoted too, so an email can\'t run a command',
+      inv('/bin/claude', ['--email', 'a@b.co; touch x $(id)']) === "'/bin/claude' '--email' 'a@b.co; touch x $(id)'")
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    check('PowerShell smart quotes are doubled like plain ones', inv('C:\\c.exe', ['a\u2019; b']) === "& 'C:\\c.exe' 'a''; b'")
   } finally {
     Object.defineProperty(process, 'platform', { value: real, configurable: true })
   }

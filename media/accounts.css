@@ -110,13 +110,15 @@ input:focus-visible, .swatch:focus-visible, .linkbtn:focus-visible, .pop:focus-v
 .btn.soft-danger { background: color-mix(in srgb, var(--destructive) 12%, transparent); }
 .btn.soft-danger:not([disabled]):hover { background: color-mix(in srgb, var(--destructive) 22%, transparent); }
 .btn.sm { height: 26px; padding: 0 10px; font-size: 12px; }
-.btn .spin { animation: spin 1s linear infinite; }
+.btn .spin, .icon-btn .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .icon-btn { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-sm);
   border: 1px solid transparent; background: transparent; color: var(--soft-foreground); cursor: pointer; padding: 0;
   transition: background-color .15s, color .15s, transform .1s; }
 .icon-btn:hover, .icon-btn[aria-expanded="true"] { background: var(--accent); color: var(--foreground); }
+.icon-btn[disabled] { opacity: .4; cursor: default; background: transparent; }
+.icon-btn[disabled]:active { transform: none; }
 
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px;
   flex-wrap: wrap; }
@@ -134,6 +136,22 @@ input:focus-visible, .swatch:focus-visible, .linkbtn:focus-visible, .pop:focus-v
   box-shadow: var(--shadow); container: card / inline-size; --fs-max: 12.5px;
   transition: background-color .15s, border-color .15s; }
 .card:hover { background: var(--card-hover); }
+.card > *:not(.ctx) { position: relative; z-index: 1; }
+
+.card .ctx { position: absolute; left: 14px; right: 14px; bottom: 9px; z-index: 0; pointer-events: none;
+  display: grid; grid-template-columns: repeat(30, 1fr); gap: 3px; }
+.ctx i { display: block; aspect-ratio: 1; border-radius: 3px; background: color-mix(in srgb, var(--foreground) 8%, transparent); }
+.ctx i.on { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.ctx i.on.s1 { background: color-mix(in srgb, var(--ok) 21%, transparent); }
+.ctx i.on.s2 { background: color-mix(in srgb, var(--ok) 27%, transparent); }
+.ctx i.on.s3 { background: color-mix(in srgb, var(--ok) 34%, transparent); }
+.ctx.warn i.on { background: color-mix(in srgb, var(--warn) 24%, transparent); }
+.ctx.bad i.on { background: color-mix(in srgb, var(--bad) 26%, transparent); }
+.ctx.shuffle i { animation: ctx-shuffle 1.6s ease-in-out infinite; }
+@keyframes ctx-shuffle {
+  0%, 100% { background: color-mix(in srgb, var(--foreground) 8%, transparent); }
+  50% { background: color-mix(in srgb, var(--ok) 34%, transparent); }
+}
 .card.live { border-color: var(--live-stroke); }
 
 .enter .card, .enter .banner, .enter .pin-list, .enter .empty { animation: rise .16s ease-out both; }

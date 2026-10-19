@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const fs = require('fs')
 const os = require('os')
@@ -69,6 +71,8 @@ check('a second prepare never overwrites a signed-in identity',
   JSON.parse(fs.readFileSync(path.join(dir, '.claude.json'), 'utf8')).oauthAccount.emailAddress === 'work@example.com')
 
 console.log('\n-- settings, and Remote Control per account --')
+store.setRemote(ROOT, 'Live', 'off')
+windows.syncSettings(ROOT, 'Work', OPTS)
 let s = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))
 check('hooks copied', s.hooks.SessionEnd[0].hooks[0].command === 'relay.bat')
 check('env and model copied', s.env.CLAUDE_CODE_ENABLE_TELEMETRY === '1' && s.model === 'opus')
@@ -82,8 +86,13 @@ check('syncing again with nothing new is a no-op', windows.syncSettings(ROOT, 'W
 store.setRemote(ROOT, 'Work', 'on')
 windows.syncSettings(ROOT, 'Work', OPTS)
 check('back on', JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).disableRemoteControl === undefined)
+store.setRemote(ROOT, 'Live', 'on')
+windows.syncSettings(ROOT, 'Work', OPTS)
+check('while no account uses the switch, a value set by hand carries into the window',
+  JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).disableRemoteControl === true)
 
 console.log('\n-- Artifacts per account --')
+const SYNCED_FILE = 'settings.synced.json'
 const winSettings = () => JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))
 const globalFile = path.join(CLAUDE, 'settings.json')
 const globalBefore = fs.readFileSync(globalFile, 'utf8')
@@ -154,8 +163,39 @@ check('nor set to ~/.claude (on macOS that picks a different Keychain item)',
 check('an explicit folder is passed through', claude.envFor(dir).CLAUDE_CONFIG_DIR === dir)
 delete process.env.CLAUDE_CONFIG_DIR
 
+console.log('\n-- settings changed inside a pinned window are kept (M6) --')
+{
+  const wFile = path.join(dir, 'settings.json')
+  const gFile = path.join(CLAUDE, 'settings.json')
+  windows.syncSettings(ROOT, 'Work', OPTS)
+  const w = JSON.parse(fs.readFileSync(wFile, 'utf8'))
+  fs.writeFileSync(wFile, JSON.stringify({ ...w, model: 'sonnet', permissions: { allow: ['Bash(ls)'] } }, null, 2))
+  const g = JSON.parse(fs.readFileSync(gFile, 'utf8'))
+  fs.writeFileSync(gFile, JSON.stringify({ ...g, theme: 'light' }, null, 2))
+  windows.syncSettings(ROOT, 'Work', OPTS)
+  const after = JSON.parse(fs.readFileSync(wFile, 'utf8'))
+  check('a change made in the window survives the next sync', after.model === 'sonnet' && after.permissions && after.permissions.allow[0] === 'Bash(ls)')
+  check('and a change in the global settings still comes through', after.theme === 'light' && after.hooks)
+  const before = fs.readFileSync(wFile, 'utf8')
+  fs.writeFileSync(gFile, '{ "half": ')
+  check('an unreadable global settings.json leaves the window\'s as they are',
+    windows.syncSettings(ROOT, 'Work', OPTS) === false && fs.readFileSync(wFile, 'utf8') === before)
+  fs.writeFileSync(gFile, JSON.stringify(g, null, 2))
+}
+
 console.log('\n-- forgetting a window login --')
-check('removed', windows.remove(ROOT, 'Work', OPTS) === true && !fs.existsSync(dir))
+fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# my notes for this account\n')
+const kept = windows.remove(ROOT, 'Work', OPTS)
+check('removed', !!kept && !fs.existsSync(dir))
+check('what was the account\'s own (its CLAUDE.md, settings changed in that window) is kept in backups/',
+  typeof kept === 'string' && kept.startsWith(path.join(ROOT, 'backups')) && fs.readFileSync(path.join(kept, 'CLAUDE.md'), 'utf8').includes('my notes') &&
+  fs.existsSync(path.join(kept, 'settings.json')))
+check('but not its login, its identity file (which can hold MCP secrets) or caches',
+  !fs.existsSync(path.join(kept, '.credentials.json')) && !fs.existsSync(path.join(kept, '.claude.json')) && !fs.existsSync(path.join(kept, SYNCED_FILE)))
+check('and no link into the shared history is kept with it', !fs.readdirSync(kept).some((e) => windows.isLink(path.join(kept, e))))
+windows.prepare(ROOT, 'Plain', OPTS)
+check('a window login with nothing of its own is simply deleted, with no backup',
+  windows.remove(ROOT, 'Plain', OPTS) === true && !fs.existsSync(windows.windowDir(ROOT, 'Plain')))
 check('THE SHARED HISTORY SURVIVES', fs.existsSync(CANARY) &&
   fs.existsSync(path.join(CLAUDE, 'projects', 'C--work-repo', 'new-chat.jsonl')))
 check('every shared folder still exists', windows.SHARED.every((x) => fs.existsSync(path.join(CLAUDE, x))))

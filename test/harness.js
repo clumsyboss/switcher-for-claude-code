@@ -1,3 +1,4 @@
+require('./fake-security')
 const Module = require('module')
 const fs = require('fs')
 const os = require('os')
@@ -11,7 +12,7 @@ process.env.USERPROFILE = FAKE_HOME
 process.env.HOME = FAKE_HOME
 delete process.env.CLAUDE_CONFIG_DIR
 
-const q = { input: [], quick: [], info: [], warn: [], open: [] }
+const q = { input: [], quick: [], info: [], warn: [], open: [], save: [] }
 const shift = (a, name) => {
   if (!a.length) throw new Error('harness: no queued response for ' + name)
   return a.shift()
@@ -82,10 +83,11 @@ const vscode = {
     },
     registerWebviewViewProvider: (id, provider) => { viewProvider = { id, provider }; return { dispose() {} } },
     showOpenDialog: async () => shift(q.open, 'showOpenDialog'),
+    showSaveDialog: async () => shift(q.save, 'showSaveDialog'),
     onDidChangeWindowState: () => ({ dispose() {} }),
     showTextDocument: async () => ({}),
     createTerminal: (opts) => {
-      const t = { opts, sent: [], show() {}, sendText(s) { t.sent.push(s) }, dispose() {} }
+      const t = { opts, sent: [], show() {}, sendText(s) { t.sent.push(s) }, dispose() { t.disposed = true } }
       terminals.push(t)
       return t
     },
@@ -131,6 +133,7 @@ const usageLib = require('../lib/usage.js')
 const windowsLib = require('../lib/windows.js')
 const trackerLib = require('../lib/tracker.js')
 const editionLib = require('../lib/edition.js')
+const moveLib = require('../lib/movefile.js')
 
 const claudeLib = require('../lib/claude.js')
 let authMock = { ok: false, error: 'mocked' }
@@ -163,18 +166,20 @@ function check(label, cond, extra) {
   else { fail++; console.log('  FAIL  ' + label + (extra ? '  <- ' + extra : '')) }
 }
 const tick = () => new Promise((r) => setTimeout(r, 30))
+const cmdOf = (t) => (t && t.opts && Array.isArray(t.opts.shellArgs) ? t.opts.shellArgs.join(' ') : '')
 const iso = (ms) => new Date(Date.now() + ms).toISOString()
 
 const CLAUDE_DIR = path.join(FAKE_HOME, '.claude')
-const LIVE_CREDS = path.join(CLAUDE_DIR, '.credentials.json')
+const credstore = require('../lib/credstore.js')
+const readLive = () => credstore.read(null)
 const LIVE_CFG = path.join(FAKE_HOME, '.claude.json')
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'))
 
 function signInLive(email, uuid, rt, expiresInMs) {
   fs.mkdirSync(CLAUDE_DIR, { recursive: true })
-  fs.writeFileSync(LIVE_CREDS, JSON.stringify({
+  credstore.write(null, {
     claudeAiOauth: { accessToken: 'AT-' + rt, refreshToken: rt, expiresAt: Date.now() + expiresInMs },
-  }))
+  })
   const prev = fs.existsSync(LIVE_CFG) ? readJson(LIVE_CFG) : {}
   fs.writeFileSync(LIVE_CFG, JSON.stringify({ ...prev,
     oauthAccount: { emailAddress: email, organizationName: 'Acme', accountUuid: uuid } }))
@@ -199,12 +204,17 @@ async function main() {
     { name: 'CLAUDE_CONFIG_DIR', value: 'C:\\old\\per-window' }, { name: 'KEEP_ME', value: 'yes' }]
   signInLive('work@example.com', 'uuid-w', 'RT-WORK', 30 * 60e3)
   const ctx = { subscriptions: [] }
+  q.warn.push('Clear It')
   ext.activate(ctx)
   await tick()
   check('root directory created', fs.existsSync(TEST_ROOT))
-  check('registers exactly the release commands',
+  check('a machine-wide CLAUDE_CONFIG_DIR is only cleared after asking (M7)',
+    messages.some((m) => m.startsWith('WARN: Claude Code is set to use CLAUDE_CONFIG_DIR=')))
+  const manifestIds = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+    .contributes.commands.map((c) => c.command.replace('claudeswitcher.', ''))
+  check('the experimental build registers every command in the manifest',
     Object.keys(registered).map((i) => i.replace('claudeswitcher.', '')).sort().join(',') ===
-      editionLib.MAIN_COMMANDS.slice().sort().join(','), Object.keys(registered).join(','))
+      manifestIds.slice().sort().join(','), Object.keys(registered).join(','))
   check('none of the removed commands exist',
     ['switchAccount', 'newChatAs', 'newTerminalAs', 'usePerWindowAccounts', 'useMachineWideAccount',
       'backup', 'restore', 'renameAccount', 'setAccountIcon', 'globalImport', 'removeAccount']
@@ -221,7 +231,7 @@ async function main() {
   check('clicking it opens the switcher', bars[0].command === 'claudeswitcher.globalSwitch')
   check('its hover says the switch is for every unpinned window, with no page link',
     /every window that isn't pinned/.test(String(bars[0].tooltip)) && !String(bars[0].tooltip).includes('command:'))
-  check('there is no bottom-left item any more', bars.length === 2)
+  check('there is no bottom-left item any more (account, usage and, in experimental, context)', bars.length === 3)
 
   console.log('\n-- Add Account: save the login you are signed in to --')
   q.quick.push('Save the account'); q.input.push('work'); q.info.push(undefined)
@@ -237,8 +247,11 @@ async function main() {
   const term = terminals[terminals.length - 1]
   check('a login terminal opened in the account\'s own folder',
     term.opts.env.CLAUDE_CONFIG_DIR === path.join(TEST_ROOT, 'accounts', 'dana'), term.opts.env.CLAUDE_CONFIG_DIR)
-  check('the live login is untouched while signing in', readJson(LIVE_CREDS).claudeAiOauth.refreshToken === 'RT-WORK')
-  check('no --email when left blank', !term.sent[0].includes('--email'), term.sent[0])
+  check('the live login is untouched while signing in', readLive().claudeAiOauth.refreshToken === 'RT-WORK')
+  check('claude runs as the terminal\'s own process: nothing is typed into a shell',
+    term.opts.shellPath === 'C:\\fake\\claude.exe' && term.sent.length === 0, JSON.stringify(term.opts))
+  check('its arguments are a list', Array.isArray(term.opts.shellArgs) && term.opts.shellArgs.slice(0, 2).join(' ') === 'auth login')
+  check('no --email when left blank', !cmdOf(term).includes('--email'), cmdOf(term))
   finishStagedLogin('dana', 'dana@example.com', 'uuid-d', 'RT-D')
   q.info.push(undefined)
   await ext._test.settle()
@@ -250,7 +263,7 @@ async function main() {
   console.log('\n-- signing in to an account you already have is caught --')
   q.input.push('second-dev', 'dev@example.com')
   await registered['claudeswitcher.globalAdd']()
-  check('the email is pre-filled on the login page', terminals[terminals.length - 1].sent[0].includes('--email dev@example.com'))
+  check('the email is pre-filled on the login page', cmdOf(terminals[terminals.length - 1]).includes('--email dev@example.com'))
   finishStagedLogin('second-dev', 'dana@example.com', 'uuid-d', 'RT-2')
   q.warn.push('Discard This Login')
   await ext._test.settle()
@@ -273,7 +286,7 @@ async function main() {
   fs.writeFileSync(path.join(CLAUDE_DIR, 'projects', 'C--repo', 'chat.jsonl'), 'precious\n')
   q.quick.push('dana'); q.info.push('Not Now')
   await registered['claudeswitcher.globalSwitch']()
-  check('the live login is now dana', readJson(LIVE_CREDS).claudeAiOauth.refreshToken === 'RT-D')
+  check('the live login is now dana', readLive().claudeAiOauth.refreshToken === 'RT-D')
   check('identity swapped', readJson(LIVE_CFG).oauthAccount.emailAddress === 'dana@example.com')
   check('the chat is exactly where it was', fs.readFileSync(path.join(CLAUDE_DIR, 'projects', 'C--repo', 'chat.jsonl'), 'utf8') === 'precious\n')
   check('the account switched away from was re-saved first',
@@ -360,6 +373,11 @@ async function main() {
   check('no page link and no legend', !tip.includes('openAccounts') && !/most room|=/.test(tip.replace(/\(command:[^)]*\)/g, '')))
   check('no em dashes', !/\u2014/.test(tip))
   check('clicking the meter updates every account', acctBar.command === 'claudeswitcher.refreshAllAccounts')
+  const startLink = (n) => 'command:claudeswitcher.startSession?' + encodeURIComponent(JSON.stringify([n]))
+  check('a ▶ to start a 5-hour session sits next to an account with no session running', rawTip.includes(startLink('late')), rawTip)
+  check('but not next to the live account, nor one whose session is already running',
+    !rawTip.includes(startLink('dana')) && !rawTip.includes(startLink('work')))
+  check('and the hover allows that command', bars[1].trusted && bars[1].trusted.enabledCommands.includes('claudeswitcher.startSession'))
   const renewsBefore = trackerCalls.filter((c) => c.startsWith('refresh:')).length
   const before = trackerCalls.length
   await registered['claudeswitcher.refreshAllAccounts']()
@@ -367,7 +385,7 @@ async function main() {
   check('but never renews a login that is not due', trackerCalls.filter((c) => c.startsWith('refresh:')).length === renewsBefore)
   await registered['claudeswitcher.switchTo']('no-such-account')
   await registered['claudeswitcher.switchTo']({ not: 'a name' })
-  check('links to unknown or malformed names do nothing', readJson(LIVE_CREDS).claudeAiOauth.refreshToken === 'RT-D')
+  check('links to unknown or malformed names do nothing', readLive().claudeAiOauth.refreshToken === 'RT-D')
   settings.claudeswitcher.trackAllAccounts = false
   ext._test.refreshAll()
   const offTip = String(acctBar.tooltip || '')
@@ -450,7 +468,7 @@ async function main() {
   check('Show Status lists it', (await ext._test.onPageMessage({ type: 'status' }), messages.some((m) => /dana.*artifacts:off/.test(m))))
   q.info.push('Not Now')
   await ext._test.onPageMessage({ type: 'switch', name: 'work' })
-  check('Switch on a card switches', readJson(LIVE_CREDS).claudeAiOauth.refreshToken.startsWith('RT-WORK'))
+  check('Switch on a card switches', readLive().claudeAiOauth.refreshToken.startsWith('RT-WORK'))
   check('switching to an account with Artifacts on removes the setting', !('enableArtifact' in readJson(SETTINGS)) &&
     readJson(SETTINGS).theme === 'kept')
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: false })
@@ -464,6 +482,116 @@ async function main() {
   check('and the user is told why', messages.some((m) => m.startsWith('WARN: Artifacts:') && m.includes('not valid JSON')))
   fs.writeFileSync(SETTINGS, goodSettings)
   store.setArtifacts(TEST_ROOT, 'work', 'on')
+
+  console.log('\n-- a login for another PC --')
+  const waitFor = async (fn, ms) => {
+    const end = Date.now() + (ms || 3000)
+    for (;;) {
+      const v = fn()
+      if (v) return v
+      if (Date.now() > end) return null
+      await new Promise((r) => setTimeout(r, 20))
+    }
+  }
+  const SPARES = path.join(TEST_ROOT, 'spares')
+  const spareDirNow = () => { try { const d = fs.readdirSync(SPARES); return d.length ? path.join(SPARES, d[0]) : null } catch { return null } }
+  const signSpare = (dir, email, rt) => {
+    fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email, organizationName: 'Acme', accountUuid: 'uuid-d' } }))
+    fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'AT-' + rt, refreshToken: rt, expiresAt: Date.now() + 3600e3 } }))
+  }
+  check('the experimental menu offers it', ext._test.pageState().features.spareLogin === true)
+  const SPARE_OUT = path.join(TEST_ROOT, 'dana-login.move')
+  const PASS = 'long enough pass'
+  const danaBefore = JSON.stringify(profiles.readPayload(TEST_ROOT, 'dana'))
+  const liveBefore = JSON.stringify(readLive())
+  const savedBefore = profiles.list(TEST_ROOT).map((p) => p.name).join(',')
+
+  q.info.push(undefined)
+  await ext._test.onPageMessage({ type: 'spareLogin', name: 'dana' })
+  check('it asks first, and a "no" does nothing', !fs.existsSync(SPARE_OUT) && !spareDirNow())
+  q.info.push('Continue'); q.input.push(PASS, 'not the same pass')
+  await ext._test.onPageMessage({ type: 'spareLogin', name: 'dana' })
+  check('mismatched passphrases stop it before any sign-in', !fs.existsSync(SPARE_OUT) && !spareDirNow() &&
+    messages.some((m) => m.includes("didn't match")))
+
+  authMock = { ok: true, loggedIn: true, email: 'dana@example.com', orgName: 'Acme' }
+  q.info.push('Continue'); q.input.push(PASS, PASS); q.save.push({ fsPath: SPARE_OUT }); q.info.push(undefined)
+  const termsBefore = terminals.length
+  const spare = ext._test.onPageMessage({ type: 'spareLogin', name: 'dana' })
+  const spareDir = await waitFor(spareDirNow)
+  const spareTerm = terminals[termsBefore]
+  check('it signs in in a folder of its own, outside the accounts folder', !!spareDir && spareTerm &&
+    spareTerm.opts.env.CLAUDE_CONFIG_DIR === spareDir && !spareDir.startsWith(path.join(TEST_ROOT, 'accounts')))
+  check('with the account\'s email filled in', spareTerm && cmdOf(spareTerm).includes('--email dana@example.com'))
+  signSpare(spareDir, 'dana@example.com', 'RT-SPARE')
+  await spare
+  const spareFile = fs.existsSync(SPARE_OUT) ? fs.readFileSync(SPARE_OUT, 'utf8') : ''
+  const opened = spareFile ? moveLib.open(spareFile, PASS) : { accounts: [] }
+  check('the new login is sealed into the file', opened.accounts.length === 1 && opened.accounts[0].name === 'dana' &&
+    opened.accounts[0].payload.credentials.claudeAiOauth.refreshToken === 'RT-SPARE')
+  check('with its identity, so the other PC knows whose it is', opened.accounts[0] &&
+    opened.accounts[0].payload.identity.oauthAccount.emailAddress === 'dana@example.com')
+  check('and nothing readable in the file', spareFile && !spareFile.includes('RT-SPARE') && !spareFile.includes('dana@example.com'))
+  const danaNow = profiles.readPayload(TEST_ROOT, 'dana')
+  check('nothing changes on this PC: the new login is not saved here, and the live login is untouched',
+    danaNow.credentials.claudeAiOauth.refreshToken !== 'RT-SPARE' &&
+    JSON.stringify(danaNow.identity) === JSON.stringify(JSON.parse(danaBefore).identity) &&
+    JSON.stringify(readLive()) === liveBefore &&
+    profiles.list(TEST_ROOT).map((p) => p.name).join(',') === savedBefore)
+  check('its sign-in folder and terminal are gone', !fs.existsSync(spareDir) && spareTerm.disposed === true)
+  check('the startup login rescue has nothing to pick up', ext._test.syncStagedLogins().length === 0)
+
+  const WRONG_OUT = path.join(TEST_ROOT, 'wrong-login.move')
+  authMock = { ok: true, loggedIn: true, email: 'someone@else.example', orgName: 'Other' }
+  q.info.push('Continue'); q.input.push(PASS, PASS); q.save.push({ fsPath: WRONG_OUT }); q.warn.push(undefined)
+  const wrong = ext._test.onPageMessage({ type: 'spareLogin', name: 'dana' })
+  const wrongDir = await waitFor(spareDirNow)
+  signSpare(wrongDir, 'someone@else.example', 'RT-WRONG')
+  await wrong
+  check('a sign-in as the wrong account saves nothing, and is destroyed', !fs.existsSync(WRONG_OUT) && !fs.existsSync(wrongDir) &&
+    messages.some((m) => m.includes('not dana@example.com')))
+
+  fs.mkdirSync(path.join(SPARES, 'dana-left'), { recursive: true })
+  fs.writeFileSync(path.join(SPARES, 'dana-left', '.credentials.json'), '{"claudeAiOauth":{"refreshToken":"RT-LEFT"}}')
+  check('a sign-in a reload interrupted is wiped at the next start', ext._test.cleanupSpares() === 1 && !fs.existsSync(path.join(SPARES, 'dana-left')))
+  authMock = { ok: false, error: 'mocked' }
+
+  console.log('\n-- start a 5-hour session --')
+  const secretsLib = require('../lib/secrets.js')
+  const evePayload = { credentials: { claudeAiOauth: { accessToken: 'AT-EVE', refreshToken: 'RT-EVE', expiresAt: Date.now() + 6 * 3600e3 } },
+    identity: { oauthAccount: { emailAddress: 'eve@example.com', organizationName: 'Acme', accountUuid: 'uuid-eve' } }, capturedAt: new Date().toISOString() }
+  fs.writeFileSync(path.join(profiles.profilesDir(TEST_ROOT), 'eve.enc'), secretsLib.protect(Buffer.from(JSON.stringify(evePayload))))
+  profiles.writeMeta(TEST_ROOT, 'eve', { email: 'eve@example.com', org: 'Acme', accountUuid: 'uuid-eve', capturedAt: evePayload.capturedAt })
+  check('the experimental page offers it', ext._test.pageState().features.startSession === true)
+  const kicked = []
+  ext._test.setKickoffRun(async (dir) => {
+    kicked.push({ dir, rt: credstore.read(dir).claudeAiOauth.refreshToken })
+    return { ok: true }
+  })
+  const liveCredsBefore = JSON.stringify(readLive())
+  await ext._test.onPageMessage({ type: 'startSession', name: 'eve' })
+  check('▶ says "hi" as that account, from its saved login', kicked.length === 1 && kicked[0].rt === 'RT-EVE')
+  check('in a throwaway folder that is gone afterwards', kicked[0] && !fs.existsSync(kicked[0].dir))
+  check('without touching the live login', JSON.stringify(readLive()) === liveCredsBefore)
+  check('and says so', messages.some((m) => m.startsWith('INFO: Started a 5-hour session for "eve"')))
+  check('the page stops showing it as starting', ext._test.pageState().accounts.find((a) => a.name === 'eve').starting === false)
+
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 1, resets_at: new Date(Date.now() + 2 * 3600e3).toISOString() },
+    { kind: 'weekly_all', percent: 1, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  await ext._test.onPageMessage({ type: 'startSession', name: 'eve' })
+  check('with a session already running, nothing is sent and it says when it resets',
+    kicked.length === 1 && messages.some((m) => m.includes('"eve" already has a 5-hour session running. It resets in')))
+  await ext._test.onPageMessage({ type: 'startSession', name: profiles.activeProfile(TEST_ROOT) })
+  check('the live account is never sent a "hi" (its session starts with your next message)',
+    kicked.length === 1 && messages.some((m) => m.includes('so its session starts with your next message')))
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [] }, Date.now())
+  ext._test.setKickoffRun(async () => ({ ok: false, reason: 'mocked failure' }))
+  await ext._test.onPageMessage({ type: 'startSession', name: 'eve' })
+  check('a failed run says why', messages.some((m) => m === 'WARN: Couldn\'t start a session for "eve": mocked failure.'))
+  ext._test.setKickoffRun(null)
+  profiles.remove(TEST_ROOT, 'eve')
   q.warn.push(undefined)
   await ext._test.onPageMessage({ type: 'forget', name: 'late' })
   check('Forget asks first (dismissed: nothing forgotten)', profiles.exists(TEST_ROOT, 'late'))
@@ -578,6 +706,10 @@ async function main() {
   check('the release page has the Artifacts switch too', ext._test.pageState().features.artifacts === true)
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: false })
   check('and it works there', store.getArtifacts(TEST_ROOT, 'work') === 'off')
+  const relFeatures = ext._test.pageState().features
+  check('since 1.2.0 the release has "login for another PC", ▶ "start a 5-hour session" and chat context',
+    relFeatures.spareLogin === true && relFeatures.startSession === true && relFeatures.context === true)
+  check('and ▶\'s command, for the usage hover\'s links', !!registered['claudeswitcher.startSession'])
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: true })
   disposeAll(run.c)
   delete process.env.CLAUDE_CONFIG_DIR
@@ -590,6 +722,66 @@ async function main() {
   check('accepts normal name', store.validName('work-2'))
   check('rejects a blank label', !store.validLabel('   '))
   check('rejects an icon with spaces', !store.validIcon('my icon'))
+
+  console.log('\n-- a machine-wide CLAUDE_CONFIG_DIR is never cleared without asking (M7) --')
+  settings.claudeCode.environmentVariables = [{ name: 'CLAUDE_CONFIG_DIR', value: '/deliberately/elsewhere' }]
+  run = activateFresh()
+  await tick()
+  check('without an answer it stays', settings.claudeCode.environmentVariables.some((e) => e.name === 'CLAUDE_CONFIG_DIR'))
+  disposeAll(run.c)
+  const remembered = new Map()
+  const withState = (answer) => {
+    for (const id of Object.keys(registered)) delete registered[id]
+    const c = { subscriptions: [], globalState: { get: (k) => remembered.get(k), update: async (k, v) => { remembered.set(k, v) } } }
+    if (answer) q.warn.push(answer)
+    ext.activate(c)
+    return c
+  }
+  let c7 = withState('Keep It')
+  await tick()
+  disposeAll(c7)
+  const asked = messages.filter((m) => m.includes('CLAUDE_CONFIG_DIR=/deliberately/elsewhere')).length
+  c7 = withState(null)
+  await tick()
+  check('"Keep It" is remembered: not asked again, and still set',
+    messages.filter((m) => m.includes('CLAUDE_CONFIG_DIR=/deliberately/elsewhere')).length === asked &&
+    settings.claudeCode.environmentVariables.some((e) => e.name === 'CLAUDE_CONFIG_DIR'))
+  disposeAll(c7)
+  settings.claudeCode.environmentVariables = []
+
+  console.log('\n-- files that can hold secrets stay private (audit #5) --')
+  if (process.platform !== 'win32') {
+    fs.chmodSync(LIVE_CFG, 0o644)
+    q.warn.push('Make Private')
+    await ext._test.offerPrivateFiles(null, true)
+    check('a ~/.claude.json other users can read is reported, and made private when asked',
+      (fs.statSync(LIVE_CFG).mode & 0o777) === 0o600, (fs.statSync(LIVE_CFG).mode & 0o777).toString(8))
+    const deadPid = require('child_process').spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout
+    const staleCopy = LIVE_CFG + '.tmp-' + deadPid + '-abcdef12'
+    fs.writeFileSync(staleCopy, '{"mcpServers":{"secret":{}}}')
+    ext._test.removeStaleTemps()
+    check('a temp copy a crashed write left behind is removed at startup', !fs.existsSync(staleCopy))
+  }
+
+  console.log('\n-- Remote Control set by hand is left alone (audit #6) --')
+  const userSettings = path.join(CLAUDE_DIR, 'settings.json')
+  for (const p of profiles.list(TEST_ROOT)) store.setRemote(TEST_ROOT, p.name, 'on')
+  fs.writeFileSync(userSettings, JSON.stringify({ disableRemoteControl: true, theme: 'dark' }, null, 2))
+  run = activateFresh()
+  await tick()
+  check('a window starting up keeps it', JSON.parse(fs.readFileSync(userSettings, 'utf8')).disableRemoteControl === true)
+  disposeAll(run.c)
+
+  console.log('\n-- hovers show outside text as text (M8) --')
+  const evil = 'Team\n\n![x](https://evil.example/b.png) [Re-auth](https://evil.example)'
+  store.setDisplay(TEST_ROOT, profiles.activeProfile(TEST_ROOT) || 'work', { label: 'ok' })
+  const cfgNow = JSON.parse(fs.readFileSync(LIVE_CFG, 'utf8'))
+  fs.writeFileSync(LIVE_CFG, JSON.stringify({ ...cfgNow, oauthAccount: { ...cfgNow.oauthAccount, organizationName: evil } }))
+  ext._test.refreshAll()
+  const accountTip = String(run.accountBar.tooltip || '')
+  check('an org name can\'t add an image or a link to the account hover',
+    !/!\[x\]\(https/.test(accountTip) && !/\[Re-auth\]\(https/.test(accountTip) && accountTip.includes('Re-auth'), accountTip.slice(0, 200))
+  fs.writeFileSync(LIVE_CFG, JSON.stringify(cfgNow))
 
   console.log('\n===== ' + pass + ' passed, ' + fail + ' failed =====')
   fs.rmSync(TEST_ROOT, { recursive: true, force: true })

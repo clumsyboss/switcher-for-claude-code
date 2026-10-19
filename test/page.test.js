@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const fs = require('fs')
 const path = require('path')
@@ -63,9 +65,9 @@ const css = fs.readFileSync(path.join(__dirname, '..', 'media', 'accounts.css'),
 check('the stylesheet loads nothing from outside', !/url\(\s*['"]?https?:/.test(css) && !/@import/.test(css))
 const durations = (css.match(/[\s,(](\d*\.?\d+)(m?s)\b/g) || [])
   .map((d) => d.trim().replace(/^[,(]/, '')).map((d) => d.endsWith('ms') ? parseFloat(d) : parseFloat(d) * 1000)
-const spinLine = css.split('\n').find((l) => l.includes('animation: spin'))
-const longest = Math.max(...durations.filter((ms) => !(spinLine && spinLine.includes(String(ms / 1000) + 's') && ms === 1000)))
-check('every transition and animation is 250ms or less (the loading spinner is a loop, not a transition)',
+const loopMs = [...css.matchAll(/animation: [\w-]+ (\d*\.?\d+)s [^;]*infinite/g)].map((m) => parseFloat(m[1]) * 1000)
+const longest = Math.max(...durations.filter((ms) => !loopMs.includes(ms)))
+check('every transition and animation is 250ms or less (endless loops like the spinner aside)',
   longest <= 250, 'longest ' + longest + 'ms')
 check('motion is switched off for people who ask for reduced motion', /prefers-reduced-motion: reduce/.test(css))
 

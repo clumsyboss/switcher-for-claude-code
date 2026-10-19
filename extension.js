@@ -1,8 +1,10 @@
 const vscode = require('vscode')
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 
 const store = require('./lib/store')
+const fsx = require('./lib/fsx')
 const claude = require('./lib/claude')
 const envBridge = require('./lib/env')
 const usageLib = require('./lib/usage')
@@ -17,6 +19,9 @@ const trackerLib = require('./lib/tracker')
 const locksLib = require('./lib/locks')
 const windowsLib = require('./lib/windows')
 const editionLib = require('./lib/edition')
+const moveLib = require('./lib/movefile')
+const kickoffLib = require('./lib/kickoff')
+const contextLib = require('./lib/context')
 const pageLib = require('./ui/page')
 
 const DEFAULT_NAME = store.DEFAULT_NAME
@@ -69,7 +74,13 @@ function applyPin() {
   if (d.ready && d.name && windowsLib.isWindowDir(root(), d.dir)) {
     try { windowsLib.syncSettings(root(), d.name) } catch (e) { d.settingsError = e && e.message }
   }
-  if (d.source === 'pin' && d.ready) process.env.CLAUDE_CONFIG_DIR = d.dir
+  if (d.source === 'pin' && d.ready) {
+    process.env.CLAUDE_CONFIG_DIR = d.dir
+    if (process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined) {
+      process.env.CLAUDESWITCHER_SECURESTORAGE_CONFIG_DIR = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+      delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    }
+  }
   pinState = { ...d, folder: firstFolder(), claudeWasActive }
 }
 
@@ -98,14 +109,14 @@ function updateStatusBar() {
     statusBar.text = '$(pin) ' + disp.label
     statusBar.backgroundColor = undefined
     statusBar.tooltip = trustedTip([
-      '**This window is pinned to ' + disp.label + '**',
-      id && id.email ? 'Email: ' + id.email : null,
-      id && id.org ? 'Org: ' + id.org : null,
-      pinState.folder ? 'Folder: ' + pinState.folder : null,
-      'Chats in this window run as ' + disp.label + '. The global switcher does not change ' +
+      '**This window is pinned to ' + mdEscape(disp.label) + '**',
+      id && id.email ? 'Email: ' + mdEscape(id.email) : null,
+      id && id.org ? 'Org: ' + mdEscape(id.org) : null,
+      pinState.folder ? 'Folder: ' + mdEscape(pinState.folder) : null,
+      'Chats in this window run as ' + mdEscape(disp.label) + '. The global switcher does not change ' +
         'this window, and the chat list is the same one every window shows.',
       pinState.claudeWasActive
-        ? '_Claude Code started a moment before the pin was applied. Chats still run as ' + disp.label + '._'
+        ? '_Claude Code started a moment before the pin was applied. Chats still run as ' + mdEscape(disp.label) + '._'
         : null,
       name && store.getRemote(root(), name) === 'off' ? 'Remote Control: **off** for this account.' : null,
       name && store.getArtifacts(root(), name) === 'off' ? 'Artifacts: **off** for this account.' : null,
@@ -124,14 +135,15 @@ function updateStatusBar() {
   statusBar.text = store.iconText((disp && disp.icon) || 'account') + ' ' + label
   statusBar.backgroundColor = active ? undefined : new vscode.ThemeColor('statusBarItem.warningBackground')
   statusBar.tooltip = trustedTip([
-    '**Claude account: ' + label + '**',
-    id && id.email ? 'Email: ' + id.email : null,
-    id && id.org ? 'Org: ' + id.org : null,
+    '**Claude account: ' + mdEscape(label) + '**',
+    id && id.email ? 'Email: ' + mdEscape(id.email) : null,
+    id && id.org ? 'Org: ' + mdEscape(id.org) : null,
     'Every window that isn\'t pinned uses this account. Your chats stay right where they are when you switch.',
     active ? null : '⚠ This login isn\'t saved yet. Open the Claude Accounts page and choose "Save it" so you can come back to it later.',
     active && store.getRemote(root(), active) === 'off' ? 'Remote Control: **off** for this account.' : null,
     active && store.getArtifacts(root(), active) === 'off' ? 'Artifacts: **off** for this account.' : null,
-    launched ? '⚠ This window was launched with CLAUDE_CONFIG_DIR=' + launched + ', so it does not follow the switcher.' : null,
+    launched ? '⚠ This window was launched with CLAUDE_CONFIG_DIR=' + mdEscape(launched) + ', so it does not follow the switcher.' : null,
+    store.registryError(root()) ? '⚠ ' + mdEscape(store.registryError(root())) : null,
     '', 'Click to switch accounts for every window that isn\'t pinned.',
   ], [])
   statusBar.show()
@@ -159,14 +171,98 @@ function updateUsageBar() {
 function refreshAll() {
   updateStatusBar()
   updateUsageBar()
+  updateContextBar()
   postState()
+}
+
+let contextBar = null
+let contextCache = { chats: [], at: 0 }
+
+function refreshContext() {
+  if (!editionLib.hasFeature(edition, 'context')) return
+  try {
+    try { store.recordLive(root(), profilesLib.activeProfile(root())) } catch {  }
+    contextCache = { chats: contextLib.withFill(contextLib.recentChats({})), at: Date.now() }
+  } catch (e) { log('context: ' + (e && e.message)) }
+  updateContextBar()
+  postState()
+}
+
+function themeKind() {
+  const k = vscode.window.activeColorTheme && vscode.window.activeColorTheme.kind
+  return k === 1 || k === 4 ? 'light' : 'dark'
+}
+
+let compactAnim = null
+let compactingIds = new Set()
+let compactTick = 0
+function checkCompacting() {
+  if (!contextBar) return
+  compactTick++
+  const mine = contextLib.currentChat(contextCache.chats, firstFolder())
+  const now = new Set()
+  for (const c of contextCache.chats) {
+    if (c !== mine && compactTick % 10 !== 0) {
+      if (compactingIds.has(c.id)) now.add(c.id)
+      continue
+    }
+    try { if (contextLib.isCompacting(c)) now.add(c.id) } catch {  }
+  }
+  const changed = now.size !== compactingIds.size || [...now].some((id) => !compactingIds.has(id))
+  const finished = [...compactingIds].some((id) => !now.has(id))
+  compactingIds = now
+  if (changed) { updateContextBar(); postState() }
+  if (finished && !compactAnim) { refreshContext(); return }
+  const cur = contextLib.currentChat(contextCache.chats, firstFolder())
+  const on = !!(cur && compactingIds.has(cur.id))
+  if (on && !compactAnim) {
+    let i = 0
+    compactAnim = setInterval(() => { contextBar.text = contextLib.fillFrame(i++, 5) }, 100)
+  } else if (!on && compactAnim) {
+    clearInterval(compactAnim)
+    compactAnim = null
+    refreshContext()
+  }
+}
+
+function updateContextBar() {
+  if (!contextBar) return
+  const chats = contextCache.chats
+  const cur = contextLib.currentChat(chats, firstFolder())
+  if (!cur) { contextBar.hide(); return }
+  if (!compactAnim) contextBar.text = contextLib.brailleBar(cur.pct, 5)
+  contextBar.color = new vscode.ThemeColor(cur.pct >= 95 ? 'charts.red' : cur.pct >= 80 ? 'charts.yellow' : 'charts.green')
+  contextBar.tooltip = contextTooltip(cur, chats)
+  contextBar.show()
+}
+
+function contextTooltip(cur, chats) {
+  const theme = themeKind()
+  const entry = (c, rows) => '**' + mdEscape(c.title) + '** · ' + c.pct + '%  \n![](' +
+    contextLib.svgDataUri(contextLib.gridSvg(c.pct, { cols: 20, rows, size: 10, gap: 3, theme, shuffle: compactingIds.has(c.id) })) + ')'
+  const parts = [entry(cur, 5)]
+  for (const c of chats) if (c !== cur) parts.push(entry(c, 2))
+  const md = new vscode.MarkdownString(parts.slice(0, 7).join('\n\n'))
+  md.supportThemeIcons = true
+  return md
+}
+
+function contextByAccount() {
+  if (!editionLib.hasFeature(edition, 'context')) return {}
+  const ctx = { pins: store.getPins(root()), liveLog: store.getLiveLog(root()) }
+  const out = {}
+  for (const c of contextCache.chats) {
+    const name = contextLib.accountOf(c, ctx)
+    if (name && !out[name]) out[name] = { pct: c.pct, compacting: compactingIds.has(c.id) }
+  }
+  return out
 }
 
 function trackingEnabled() {
   return vscode.workspace.getConfiguration('claudeswitcher').get('trackAllAccounts') !== false
 }
 
-function mdEscape(t) { return String(t).replace(/[|\\[\]*_`<>]/g, (c) => '\\' + c) }
+function mdEscape(t) { return String(t).replace(/[\r\n]+/g, ' ').replace(/[|\\[\]*_`<>!()#~]/g, (c) => '\\' + c) }
 
 function useCell(l, withTime) {
   if (!l) return 'n/a'
@@ -209,6 +305,10 @@ function usageTooltip(cur, usage) {
     else {
       name = '[' + label + '](command:claudeswitcher.switchTo?' + encodeURIComponent(JSON.stringify([r.name])) +
         ' "Switch every window that isn\'t pinned to ' + label + '")'
+      if (canStartSession(r)) {
+        name += ' [$(play)](command:claudeswitcher.startSession?' + encodeURIComponent(JSON.stringify([r.name])) +
+          ' "Start a 5-hour session for ' + label + '")'
+      }
     }
     const cells = r.needsLogin ? ['n/a' + GAP, 'n/a' + GAP, 'n/a']
       : [useCell(r.session, true) + GAP, useCell(r.weekly, true) + GAP, useCell(r.scoped, false)]
@@ -220,11 +320,63 @@ function usageTooltip(cur, usage) {
     table.join('\n'),
     extra ? 'Extra usage for ' + mdEscape(labelOf(cur.name) || 'this account') + ': ' + extra + ' this month.' : null,
     'Click to update every account.  \nClick a name to switch to that account globally.  \n_(pinned folders are unaffected)_',
-  ], ['claudeswitcher.switchTo'])
+  ], ['claudeswitcher.switchTo', 'claudeswitcher.startSession'])
 }
 
 let trackerRunning = false
 let trackerManual = false
+
+const startingSessions = new Set()
+let kickoffRun = null
+
+function sessionRunning(limit) {
+  if (!limit || limit.resetSince || !limit.resetsAt) return false
+  return Date.parse(limit.resetsAt) > Date.now()
+}
+
+function canStartSession(row) {
+  return editionLib.hasFeature(edition, 'startSession') && !!row && !!row.name && !row.active && !row.needsLogin &&
+    !sessionRunning(row.session) && !startingSessions.has(row.name)
+}
+
+async function startSessionFor(nameArg) {
+  if (!editionLib.hasFeature(edition, 'startSession')) return
+  const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg) ? nameArg : null
+  if (!name || startingSessions.has(name)) return
+  const label = labelOf(name)
+  if (name === profilesLib.activeProfile(root())) {
+    vscode.window.showInformationMessage('"' + label + '" is the account Claude Code is using, so its session starts with your next message.')
+    return
+  }
+  const row = snapshotRows().find((r) => r.name === name)
+  if (row && sessionRunning(row.session)) {
+    vscode.window.showInformationMessage('"' + label + '" already has a 5-hour session running. It resets in ' +
+      (usageLib.untilTime(row.session.resetsAt) || 'a moment') + '.')
+    return
+  }
+
+  startingSessions.add(name)
+  refreshAll()
+  try {
+    const res = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Starting a 5-hour session for "' + label + '"…' },
+      () => kickoffLib.startSession(root(), name, { renew: trackerLib.renew, run: kickoffRun || undefined }))
+    if (!res || !res.ok) {
+      log('start session for "' + name + '" failed: ' + (res && res.reason))
+      vscode.window.showWarningMessage("Couldn't start a session for \"" + label + '": ' + ((res && res.reason) || 'something went wrong') + '.')
+      return
+    }
+    log('started a 5-hour session for "' + name + '"')
+    try { await trackerLib.poll(root(), name, { force: true }) } catch (e) { log('usage after start: ' + (e && e.message)) }
+    const after = snapshotRows().find((r) => r.name === name)
+    const left = after && sessionRunning(after.session) ? usageLib.untilTime(after.session.resetsAt) : null
+    vscode.window.showInformationMessage('Started a 5-hour session for "' + label + '".' +
+      (left ? ' It resets in ' + left + '.' : ' Its usage will catch up in a moment.'))
+  } finally {
+    startingSessions.delete(name)
+    refreshAll()
+  }
+}
 
 let updatingAll = false
 async function refreshAllAccounts() {
@@ -296,18 +448,22 @@ async function switchTo(name) {
   await switchToProfile(name)
 }
 
+function loginArgs(email) {
+  return ['auth', 'login'].concat(shell.validEmail(email) ? ['--email', email] : [])
+}
+
 function launchTerminal(title, dir, args) {
   const bin = claude.resolveBin()
   if (!bin) {
     vscode.window.showErrorMessage("Couldn't find Claude Code's command-line tool (claude). Install Claude Code, or add it to your PATH, and try again.")
     return null
   }
-  const env = { CLAUDE_CONFIG_DIR: dir || '' }
+  if (dir) prepareLoginDir(dir)
+  const env = { CLAUDE_CONFIG_DIR: dir || null, CLAUDE_SECURESTORAGE_CONFIG_DIR: null }
   const term = vscode.window.createTerminal({
-    name: title, env, iconPath: new vscode.ThemeIcon('account'),
+    name: title, env, iconPath: new vscode.ThemeIcon('account'), ...shell.terminalSpec(bin, args),
   })
   term.show()
-  term.sendText(shell.invoke(bin, args))
   return term
 }
 
@@ -317,9 +473,38 @@ const IDENTITY_GRACE_MS = 10000
 const loginWatchers = new Set()
 const pendingLogins = new Set()
 
+const PENDING_FILE = '.login-pending'
+
+function prepareLoginDir(dir) {
+  const cfgPath = path.join(dir, '.claude.json')
+  try {
+    const { data, stamp } = fsx.readJsonForWrite(cfgPath)
+    if (data.oauthAccount !== undefined || data.userID !== undefined) {
+      delete data.oauthAccount
+      delete data.userID
+      fsx.writeJsonAtomic(cfgPath, data, { expect: stamp, mode: 0o600 })
+    }
+  } catch (e) {
+    if (e.code === 'EUNREADABLEJSON') fs.rmSync(cfgPath, { force: true })
+    else log('preparing ' + dir + ': ' + (e && e.message))
+  }
+  try { fsx.writeJsonAtomic(path.join(dir, PENDING_FILE), { pid: process.pid, startedAt: Date.now() }) } catch {  }
+}
+
+function finishLoginDir(dir) {
+  try { fs.rmSync(path.join(dir, PENDING_FILE), { force: true }) } catch {  }
+}
+
+function loginPending(dir) {
+  const m = fsx.readJsonLoose(path.join(dir, PENDING_FILE), null)
+  if (!m || !Number.isInteger(m.pid)) return false
+  return fsx.pidAlive(m.pid) && Date.now() - (Number(m.startedAt) || 0) < LOGIN_TIMEOUT_MS + 60000
+}
+
 function watchLogin(dir, startedAt, cancelToken) {
   return new Promise((resolve) => {
     let lastCheckedMtime = 0
+    let polls = 0
     let confirmed = null
     let confirmedAt = 0
 
@@ -335,8 +520,11 @@ function watchLogin(dir, startedAt, cancelToken) {
       if (Date.now() - startedAt > LOGIN_TIMEOUT_MS) return finish({ ok: false, reason: 'timed out' })
 
       if (confirmed) {
-        const id = store.identityFromFile(path.join(dir, '.claude.json'))
-        if ((id && id.email) || Date.now() - confirmedAt > IDENTITY_GRACE_MS) {
+        const cfgPath = path.join(dir, '.claude.json')
+        const id = store.identityFromFile(cfgPath)
+        const st = fsx.stamp(cfgPath)
+        const fresh = !!(id && id.email && st && st.mtimeMs >= startedAt - 2000)
+        if (fresh || Date.now() - confirmedAt > IDENTITY_GRACE_MS) {
           finish({ ok: true, status: confirmed })
         }
         return
@@ -348,8 +536,14 @@ function watchLogin(dir, startedAt, cancelToken) {
         if (!st.exists) return
         mtime = st.modifiedMs
       } catch (e) { log('login watch: ' + (e && e.message)); return }
-      if (mtime < startedAt - 2000 || mtime === lastCheckedMtime) return
-      lastCheckedMtime = mtime
+      polls++
+      if (mtime === null) {
+        if (polls % 5 !== 0) return
+      } else {
+        if (mtime < startedAt - 2000) return
+        if (mtime === lastCheckedMtime && polls % 5 !== 0) return
+        lastCheckedMtime = mtime
+      }
 
       const st = claude.authStatus(dir)
       if (st.ok && st.loggedIn) {
@@ -368,6 +562,7 @@ function trackLogin(name, dir, startedAt, isNew) {
     cancellable: true,
   }, (_progress, token) => watchLogin(dir, startedAt, token)))
     .then((res) => {
+      finishLoginDir(dir)
       if (res.ok) return finalizeLogin(name, dir, res.status, isNew)
       if (res.reason === 'timed out') {
         vscode.window.showWarningMessage(
@@ -377,6 +572,7 @@ function trackLogin(name, dir, startedAt, isNew) {
       return null
     })
     .catch((e) => {
+      finishLoginDir(dir)
       log('login tracking for ' + name + ' failed: ' + (e && e.stack))
       vscode.window.showErrorMessage('Claude Accounts: ' + (e && e.message))
     })
@@ -385,30 +581,53 @@ function trackLogin(name, dir, startedAt, isNew) {
   return run
 }
 
+function signedInAs(dir, st) {
+  const id = store.identityFromFile(path.join(dir, '.claude.json'))
+  return { accountUuid: (id && id.accountUuid) || null, email: (id && id.email) || (st && st.email) || null }
+}
+
 async function finalizeLogin(name, dir, st, isNew) {
   store.lockdown(dir)
   const fallback = { email: st.email, org: st.orgName }
+  const who = signedInAs(dir, st)
 
-  const dup = profilesLib.findByEmail(root(), st.email, name)
+  const dup = profilesLib.findSameAccount(root(), who, name)
   if (dup) {
     const update = 'Update "' + dup + '"'
     const choice = await vscode.window.showWarningMessage(
-      'You signed in as ' + st.email + ', which is already saved as "' + dup + '". ' +
+      'You signed in as ' + who.email + ', which is already saved as "' + dup + '". ' +
       'Your browser probably reused an account it was already signed in to. ' +
       'Try a private window to sign in to a different one.',
       { modal: true }, update, 'Discard This Login')
     if (choice === update) {
-      profilesLib.importFromDir(root(), dup, dir, { move: true, fallback })
+      profilesLib.importFromDir(root(), dup, dir, { move: true, fallback, sameAccountOnly: true, confirmedEmail: st.loggedIn ? st.email : null })
       vscode.window.showInformationMessage('Refreshed the saved login for "' + dup + '".')
     } else {
       try { credstore.remove(dir) } catch (e) { log('discard failed: ' + (e && e.message)) }
     }
-    if (isNew) store.removeAccount(root(), name)
+    if (isNew) {
+      try { store.removeAccount(root(), name) } catch (e) { log('removing "' + name + '": ' + (e && e.message)) }
+    }
     refreshAll()
     return
   }
 
-  profilesLib.importFromDir(root(), name, dir, { move: true, fallback })
+  try {
+    profilesLib.importFromDir(root(), name, dir, { move: true, fallback, sameAccountOnly: !isNew, confirmedEmail: st.loggedIn ? st.email : null })
+  } catch (e) {
+    if (e && e.code === 'ENOIDENTITY') {
+      vscode.window.showInformationMessage('"' + name + '" signed in. It will be added as soon as Claude Code has ' +
+        'written its account details, on its own or at the next reload.')
+      return
+    }
+    if (e && e.code === 'EACCOUNTMISMATCH') {
+      try { credstore.remove(dir) } catch (e2) { log('discarding wrong login failed: ' + (e2 && e2.message)) }
+      await vscode.window.showWarningMessage(e.message + ' Your browser most likely reused another account: ' +
+        'sign in again from a private window.', { modal: true })
+      return
+    }
+    throw e
+  }
 
   if (profilesLib.activeProfile(root()) === name) {
     profilesLib.apply(root(), name)
@@ -426,31 +645,39 @@ async function finalizeLogin(name, dir, st, isNew) {
 
 function syncStagedLogins() {
   const imported = []
-  for (const a of store.readRegistry(root()).accounts) {
-    const dir = store.configDir(root(), a.name)
+  let accounts = []
+  try { accounts = store.readRegistry(root()).accounts } catch (e) { log('staged logins: ' + (e && e.message)); return imported }
+  for (const a of accounts) {
+    let dir
+    try { dir = store.configDir(root(), a.name) } catch { continue }
+    if (loginPending(dir)) continue
     let mtime
     try {
       const st = credstore.stat(dir)
       if (!st.exists) continue
       mtime = st.modifiedMs
     } catch (e) { log('staged login check for "' + a.name + '": ' + (e && e.message)); continue }
-    if (profilesLib.exists(root(), a.name) && mtime <= profilesLib.capturedAt(root(), a.name)) continue
+    if (profilesLib.exists(root(), a.name) && (mtime === null || mtime <= profilesLib.capturedAt(root(), a.name))) continue
 
     const id = store.identity(root(), a.name)
-    if (!id || !id.email) continue
-    const dup = profilesLib.findByEmail(root(), id.email, a.name)
+    if (!id || (!id.email && !id.accountUuid)) continue
+    const dup = profilesLib.findSameAccount(root(), id, a.name)
     if (dup) {
       log('not importing "' + a.name + '": it is the same account as "' + dup + '"')
       vscode.window.showWarningMessage('"' + a.name + '" is signed in as ' + id.email +
         ', which is already saved as "' + dup + '", so it was not added twice.')
       continue
     }
+    const release = locksLib.tryAcquire(root(), trackerLib.accountLock(a.name), trackerLib.LOCK_STALE_MS)
+    if (!release) continue
     try {
-      profilesLib.importFromDir(root(), a.name, dir, { move: true })
+      profilesLib.importFromDir(root(), a.name, dir, { move: true, sameAccountOnly: true })
       imported.push(a.name)
       log('imported staged login "' + a.name + '" (' + id.email + ')')
     } catch (e) {
       log('import of "' + a.name + '" failed: ' + (e && e.message))
+    } finally {
+      release()
     }
   }
   if (imported.length) refreshAll()
@@ -490,17 +717,19 @@ async function signInNewAccount() {
   })
   if (!name) return
 
-  const email = await vscode.window.showInputBox({
+  let email = await vscode.window.showInputBox({
     title: 'Add "' + name + '"',
     prompt: 'Email to pre-fill on the login page (optional)',
     placeHolder: 'you@example.com',
+    validateInput: (v) => (!v || shell.validEmail(v.trim()) ? null : "That doesn't look like an email address. Leave it empty to type it on the login page."),
   })
   if (email === undefined) return
+  email = email.trim()
 
   const dir = store.addAccount(root(), name)
   refreshAll()
 
-  const args = ['auth', 'login'].concat(email ? ['--email', email] : [])
+  const args = loginArgs(email)
   const startedAt = Date.now()
   if (!launchTerminal('Claude login: ' + name, dir, args)) return
   trackLogin(name, dir, startedAt, true)
@@ -512,19 +741,34 @@ async function saveCurrentLogin(suggested) {
     return null
   }
   const id = profilesLib.currentIdentity()
-  const name = await vscode.window.showInputBox({
+  const already = id ? profilesLib.findSameAccount(root(), id, null) : null
+  let name = await vscode.window.showInputBox({
     title: 'Save Current Login',
     prompt: 'Name for the account currently signed in' + (id && id.email ? ' (' + id.email + ')' : ''),
-    value: suggested || '',
+    value: suggested || already || '',
     placeHolder: 'work-team',
     validateInput: (v) => {
       if (!v) return 'Name is required'
       if (!store.validName(v)) return 'Use 1-32 chars: letters, digits, dot, underscore, hyphen'
+      if (v !== already && profilesLib.exists(root(), v) && !(id && profilesLib.sameAccount(profilesLib.savedWho(root(), v), id))) {
+        return '"' + v + '" is another saved account. Pick a new name.'
+      }
       return null
     },
   })
   if (!name) return null
-  const saved = profilesLib.capture(root(), name)
+  if (already && name !== already) {
+    const update = 'Update "' + already + '"'
+    const choice = await vscode.window.showInformationMessage(
+      'This account is already saved as "' + labelOf(already) + '". Update that one instead?', { modal: true }, update)
+    if (choice !== update) return null
+    name = already
+  }
+  let saved
+  try { saved = profilesLib.capture(root(), name) } catch (e) {
+    vscode.window.showWarningMessage('Nothing was saved: ' + (e && e.message))
+    return null
+  }
   refreshAll()
   vscode.window.showInformationMessage('Saved "' + name + '"' + (saved.email ? ' (' + saved.email + ')' : '') + '.')
   return name
@@ -565,7 +809,7 @@ async function relogin(nameArg) {
   const dir = store.configDir(root(), name)
   const expected = (profilesLib.readMeta(root(), name) || {}).email
   const startedAt = Date.now()
-  if (!launchTerminal('Claude login: ' + name, dir, ['auth', 'login'].concat(expected ? ['--email', expected] : []))) return
+  if (!launchTerminal('Claude login: ' + name, dir, loginArgs(expected))) return
   trackLogin(name, dir, startedAt, false)
 }
 
@@ -598,7 +842,7 @@ function editAccount(name, label, icon, color) {
 }
 
 function applyRemotePreference(name) {
-  if (!name) return null
+  if (!name || !store.remoteManaged(root())) return null
   const off = store.getRemote(root(), name) === 'off'
   let res
   try { res = remoteLib.setDisabled(off) } catch (e) { log('remote control: ' + (e && e.message)); return null }
@@ -638,7 +882,12 @@ function setRemoteFor(name, on) {
   if (!profilesLib.exists(root(), name)) return
   store.setRemote(root(), name, on ? 'on' : 'off')
   let applied = false
-  if (profilesLib.activeProfile(root()) === name) applied = !!(applyRemotePreference(name) || {}).changed
+  if (profilesLib.activeProfile(root()) === name) {
+    try { applied = remoteLib.setDisabled(!on).changed } catch (e) {
+      log('remote control: ' + (e && e.message))
+      vscode.window.showWarningMessage('Remote Control: ' + (e && e.message))
+    }
+  }
   try {
     if (fs.existsSync(windowsLib.windowDir(root(), name)) && windowsLib.syncSettings(root(), name)) applied = true
   } catch (e) { log('window settings sync: ' + (e && e.message)) }
@@ -648,8 +897,36 @@ function setRemoteFor(name, on) {
 }
 
 async function ensureGlobalMode() {
-  if (envBridge.currentConfigDir(vscode)) await envBridge.setConfigDir(vscode, null)
-  if (store.getMode(root()) !== 'login') store.setMode(root(), 'login')
+  await resolveMachineConfigDir(true)
+  try { if (store.getMode(root()) !== 'login') store.setMode(root(), 'login') } catch (e) { log('mode: ' + (e && e.message)) }
+  return true
+}
+
+let extContext = null
+const CONFIG_DIR_CHOICE = 'claudeswitcher.machineConfigDir'
+
+async function resolveMachineConfigDir(modal) {
+  const dir = envBridge.currentConfigDir(vscode)
+  if (!dir) return true
+  const state = extContext && extContext.globalState
+  const choice = state ? state.get(CONFIG_DIR_CHOICE) : undefined
+  if (choice === 'keep') return false
+  if (choice !== 'clear') {
+    const msg = 'Claude Code is set to use CLAUDE_CONFIG_DIR=' + dir + ' in every window (in the ' +
+      'claudeCode.environmentVariables setting). While it is set, switching accounts and folder pins have no effect. Clear it?'
+    const pick = modal
+      ? await vscode.window.showWarningMessage(msg, { modal: true }, 'Clear It', 'Keep It')
+      : await vscode.window.showWarningMessage(msg, 'Clear It', 'Keep It')
+    if (pick === 'Keep It') {
+      if (state) await state.update(CONFIG_DIR_CHOICE, 'keep')
+      log('kept the machine-wide CLAUDE_CONFIG_DIR, as asked')
+      return false
+    }
+    if (pick !== 'Clear It') return false
+    if (state) await state.update(CONFIG_DIR_CHOICE, 'clear')
+  }
+  await envBridge.setConfigDir(vscode, null)
+  log('cleared the machine-wide CLAUDE_CONFIG_DIR override')
   return true
 }
 
@@ -674,20 +951,19 @@ async function globalSwitch() {
   await switchToProfile(pick.name)
 }
 
-async function switchToProfile(name) {
-  const pick = { name }
-  const active = profilesLib.activeProfile(root())
-  if (active === pick.name) {
-    vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
-    return
-  }
+let switchQueue = Promise.resolve()
+function switchToProfile(name) {
+  const run = switchQueue.then(() => doSwitch(name))
+  switchQueue = run.catch(() => {})
+  return run
+}
 
+async function lockAccounts(names) {
   const held = []
-  const lockNames = [pick.name, active].filter(Boolean).sort()
-  const gotLocks = await vscode.window.withProgress(
+  const ok = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Waiting for a background login renewal to finish...' },
     async () => {
-      for (const n of lockNames) {
+      for (const n of [...new Set(names.filter(Boolean))].sort()) {
         const release = await locksLib.acquire(root(), trackerLib.accountLock(n),
           { waitMs: 45000, staleMs: trackerLib.LOCK_STALE_MS })
         if (!release) return false
@@ -695,21 +971,68 @@ async function switchToProfile(name) {
       }
       return true
     })
-  if (!gotLocks) {
+  if (ok) return held
+  held.forEach((r) => r())
+  return null
+}
+
+async function doSwitch(name) {
+  const pick = { name }
+  let active = profilesLib.activeProfile(root())
+  if (active === pick.name) {
+    vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
+    return
+  }
+
+  if (!active && liveLoginUnsaved()) {
+    const id = profilesLib.currentIdentity()
+    const choice = await vscode.window.showWarningMessage(
+      'The account Claude Code is using now' + (id && id.email ? ' (' + id.email + ')' : '') + " isn't saved in the " +
+      'switcher. Switching replaces its login, so save it first if you want to come back to it.',
+      { modal: true }, 'Save It First', 'Switch Without Saving')
+    if (choice === 'Save It First') {
+      active = await saveCurrentLogin()
+      if (!active) return
+    } else if (choice !== 'Switch Without Saving') return
+  }
+
+  let held = null
+  for (let round = 0; round < 3; round++) {
+    held = await lockAccounts([pick.name, active])
+    if (!held) {
+      vscode.window.showErrorMessage('Switch cancelled: a background login renewal did not finish. Try again in a minute.')
+      return
+    }
+    const now = profilesLib.activeProfile(root())
+    if (now === active) break
     held.forEach((r) => r())
-    vscode.window.showErrorMessage('Switch cancelled: a background login renewal did not finish. Try again in a minute.')
+    held = null
+    active = now
+    if (active === pick.name) {
+      vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
+      return
+    }
+  }
+  if (!held) {
+    vscode.window.showErrorMessage('Switch cancelled: the live account kept changing in another window. Try again.')
     return
   }
 
   let applied
   try {
     if (active && profilesLib.hasCurrentLogin()) {
-      try { profilesLib.capture(root(), active) } catch (e) { log('pre-switch capture failed: ' + e.message) }
+      try { profilesLib.capture(root(), active) } catch (e) {
+        log('pre-switch capture of "' + active + '" failed: ' + (e && e.message))
+        vscode.window.showErrorMessage('Switch cancelled: the login Claude Code is using now couldn\'t be saved to "' +
+          labelOf(active) + '" first. ' + (e && e.message) + ' Nothing was changed.')
+        return
+      }
     }
     usageLib.rememberClaudeCache(root(), null)
     applied = profilesLib.apply(root(), pick.name)
   } catch (e) {
-    vscode.window.showErrorMessage('Switch failed: ' + (e && e.message))
+    const why = String((e && e.message) || 'something went wrong').replace(/\.?$/, '.')
+    vscode.window.showErrorMessage('Switch failed: ' + why + (e && e.code === 'ENOIDENTITY' ? '' : ' Your previous login is still in place.'))
     return
   } finally {
     held.forEach((r) => r())
@@ -841,7 +1164,7 @@ async function windowLogin(nameArg) {
   const expected = (profilesLib.readMeta(root(), name) || {}).email || null
   const dir = windowsLib.prepare(root(), name)
   const startedAt = Date.now()
-  const args = ['auth', 'login'].concat(expected ? ['--email', expected] : [])
+  const args = loginArgs(expected)
   if (!launchTerminal('Claude window login: ' + name, dir, args)) return false
 
   const res = await vscode.window.withProgress({
@@ -850,6 +1173,7 @@ async function windowLogin(nameArg) {
     title: 'Signing in a window login for "' + name + '"' + (expected ? ' (' + expected + ')' : '') +
       '. Finish in the browser; use a private window if it is signed in to another account.',
   }, (_progress, token) => watchLogin(dir, startedAt, token))
+  finishLoginDir(dir)
   if (!res || !res.ok) {
     if (res && res.reason === 'timed out') {
       vscode.window.showWarningMessage('Stopped waiting for the window login for "' + name + '".')
@@ -871,6 +1195,148 @@ async function windowLogin(nameArg) {
   refreshAll()
   vscode.window.showInformationMessage('Window login ready for "' + name + '"' + (got ? ' (' + got + ')' : '') + '.')
   return true
+}
+
+function sparesRoot() { return path.join(root(), 'spares') }
+
+const SPARE_MAX_AGE_MS = LOGIN_TIMEOUT_MS + 5 * 60 * 1000
+
+function destroySpare(dir) {
+  try { credstore.remove(dir) } catch (e) { log('spare login cleanup (will retry): ' + (e && e.message)); return false }
+  try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) { log('spare folder cleanup: ' + (e && e.message)) }
+  return true
+}
+
+function cleanupSpares() {
+  let entries = []
+  try { entries = fs.readdirSync(sparesRoot()) } catch { return 0 }
+  let removed = 0
+  for (const e of entries) {
+    const dir = path.join(sparesRoot(), e)
+    const owner = fsx.readJsonLoose(path.join(dir, 'owner.json'), null)
+    let born = 0
+    try { born = (owner && Number(owner.startedAt)) || fs.statSync(dir).mtimeMs } catch { continue }
+    if (owner && fsx.pidAlive(owner.pid) && Date.now() - born < SPARE_MAX_AGE_MS) continue
+    if (destroySpare(dir)) removed++
+  }
+  if (removed) log('removed ' + removed + ' unfinished login(s) for another PC')
+  return removed
+}
+
+async function askPassphrase() {
+  const first = await vscode.window.showInputBox({
+    title: 'Passphrase for the login file',
+    prompt: 'You will type this again on the other PC to import it. At least ' + moveLib.MIN_PASSPHRASE + ' characters.',
+    password: true, ignoreFocusOut: true,
+    validateInput: (v) => (v && v.length >= moveLib.MIN_PASSPHRASE ? null : 'Use at least ' + moveLib.MIN_PASSPHRASE + ' characters.'),
+  })
+  if (!first) return null
+  const again = await vscode.window.showInputBox({
+    title: 'Passphrase for the login file',
+    prompt: 'Type it once more.', password: true, ignoreFocusOut: true,
+  })
+  if (again === undefined) return null
+  if (again !== first) {
+    vscode.window.showWarningMessage("The two passphrases didn't match, so nothing was made. Try again whenever you like.")
+    return null
+  }
+  return first
+}
+
+async function makeSpareLogin(nameArg) {
+  const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg) ? nameArg : null
+  if (!name) return false
+  const meta = profilesLib.readMeta(root(), name) || {}
+  const expected = meta.email || null
+  const label = labelOf(name)
+
+  const go = await vscode.window.showInformationMessage(
+    'Make a separate login for "' + label + '" to take to another PC?',
+    { modal: true, detail: 'You will sign in to ' + (expected || 'the account') + ' once more in the browser, ' +
+      'so you need its login or a code from its owner. The new login goes into a passphrase-protected file. ' +
+      'This PC keeps its own login for "' + label + '", and nothing here changes.\n\n' +
+      'Like any login, it lasts about four weeks from today, even while it sits in the file.' },
+    'Continue')
+  if (go !== 'Continue') return false
+
+  const passphrase = await askPassphrase()
+  if (!passphrase) return false
+
+  const target = await vscode.window.showSaveDialog({
+    title: 'Save the login for another PC',
+    saveLabel: 'Save login file',
+    defaultUri: vscode.Uri.file(path.join(os.homedir(), name + '-login.move')),
+    filters: { 'Account move file': ['move'] },
+  })
+  if (!target) return false
+
+  fs.mkdirSync(sparesRoot(), { recursive: true })
+  const dir = fs.mkdtempSync(path.join(sparesRoot(), name + '-' + process.pid + '-'))
+  store.lockdown(dir)
+  fsx.writeJsonAtomic(path.join(dir, 'owner.json'), { pid: process.pid, startedAt: Date.now() })
+  let term = null
+  try {
+    const startedAt = Date.now()
+    term = launchTerminal('Claude login for another PC: ' + label, dir,
+      loginArgs(expected))
+    if (!term) return false
+
+    const res = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      cancellable: true,
+      title: 'Signing in a login for another PC: "' + label + '"' + (expected ? ' (' + expected + ')' : '') +
+        '. Finish in the browser; use a private window if it is signed in to another account.',
+    }, (_progress, token) => watchLogin(dir, startedAt, token))
+    finishLoginDir(dir)
+    if (!res || !res.ok) {
+      if (res && res.reason === 'timed out') vscode.window.showWarningMessage('Stopped waiting for the login for "' + label + '". Nothing was saved.')
+      return false
+    }
+
+    let cfg = {}
+    try { cfg = JSON.parse(fs.readFileSync(path.join(dir, '.claude.json'), 'utf8')) || {} } catch {  }
+    const o = cfg.oauthAccount || {}
+    const got = (res.status && res.status.email) || o.emailAddress || null
+    if (expected && (!got || got.toLowerCase() !== expected.toLowerCase())) {
+      await vscode.window.showWarningMessage('That signed in as ' + (got || 'an unknown account') + ', not ' + expected +
+        ', so nothing was saved. Your browser probably reused another account. Try again in a private window signed in to ' +
+        expected + '.', { modal: true })
+      return false
+    }
+    const credentials = credstore.read(dir)
+    if (!credentials || !credentials.claudeAiOauth || !credentials.claudeAiOauth.refreshToken) {
+      throw new Error('the sign-in finished, but its login could not be read')
+    }
+
+    const identity = {}
+    for (const k of profilesLib.IDENTITY_KEYS) if (cfg[k] !== undefined) identity[k] = cfg[k]
+    const capturedAt = new Date().toISOString()
+    const account = {
+      name,
+      payload: { credentials, identity, capturedAt },
+      meta: { email: got || expected, org: o.organizationName || meta.org || null, subscription: o.seatTier || null,
+        capturedAt, accountUuid: o.accountUuid || meta.accountUuid || null },
+      display: store.displayOf(root(), name),
+      remote: store.getRemote(root(), name),
+      artifacts: store.getArtifacts(root(), name),
+    }
+    const file = target.fsPath
+    fsx.writeFileAtomic(file, moveLib.seal({ exportedAt: capturedAt, kind: 'login-for-another-pc', accounts: [account] }, passphrase),
+      { mode: 0o600, forceMode: true, fsync: true })
+    const back = moveLib.open(fs.readFileSync(file, 'utf8'), passphrase)
+    if (!back.accounts || !back.accounts[0] ||
+      back.accounts[0].payload.credentials.claudeAiOauth.refreshToken !== credentials.claudeAiOauth.refreshToken) {
+      throw new Error("the file didn't read back correctly")
+    }
+    log('made a login for another PC for "' + name + '"')
+    vscode.window.showInformationMessage('Saved a separate login for "' + label + '" to ' + file + '. ' +
+      'On the other PC, import it with move-accounts.js and the same passphrase, then delete the file. ' +
+      'It lasts about four weeks from today.')
+    return true
+  } finally {
+    if (term) { try { term.dispose() } catch {  } }
+    destroySpare(dir)
+  }
 }
 
 function windowLoginNames() {
@@ -904,11 +1370,59 @@ async function forgetWindowLogin(nameArg) {
     '"? Folders pinned to it go back to the global account. Your chats, and the account saved in ' +
     'the switcher, are not affected.', { modal: true }, 'Forget')
   if (confirm !== 'Forget') return
+  const kept = windowsLib.remove(root(), name)
   const unpinned = store.unpinAccount(root(), name)
-  windowsLib.remove(root(), name)
   refreshAll()
+  const keptNote = typeof kept === 'string' && kept.includes(path.join(root(), 'backups'))
+    ? ' Its own files (like a CLAUDE.md or settings made in that window) are kept in ' + kept + '.' : ''
   vscode.window.showInformationMessage('Forgot the window login for "' + labelOf(name) + '"' +
-    (unpinned ? '; ' + unpinned + ' folder pin' + (unpinned === 1 ? '' : 's') + ' removed.' : '.'))
+    (unpinned ? '; ' + unpinned + ' folder pin' + (unpinned === 1 ? '' : 's') + ' removed.' : '.') + keptNote)
+}
+
+function privateFiles() {
+  const p = profilesLib.paths()
+  return [p.claudeJson, path.join(p.claudeDir, 'settings.json')]
+}
+
+function looseFiles() { return privateFiles().filter((f) => fsx.othersCanRead(f)) }
+
+function makePrivate(files) {
+  const done = []
+  for (const f of files) {
+    try { fs.chmodSync(fsx.writeTarget(f), 0o600); done.push(f) } catch (e) { log('chmod ' + f + ': ' + (e && e.message)) }
+  }
+  return done
+}
+
+async function offerPrivateFiles(context, always) {
+  const loose = looseFiles()
+  if (!loose.length) return
+  const key = 'claudeswitcher.dontAskPrivateFiles'
+  if (!always && context && context.globalState && context.globalState.get(key)) return
+  const names = loose.map((f) => f.replace(os.homedir(), '~')).join(' and ')
+  const choice = await vscode.window.showWarningMessage(
+    names + ' can be read by other users on this computer. They can hold ' +
+    'MCP server tokens and API keys. Make ' + (loose.length > 1 ? 'them' : 'it') + ' private (only you can read it)?',
+    'Make Private', ...(always ? [] : ["Don't Ask Again"]))
+  if (choice === 'Make Private') {
+    const done = makePrivate(loose)
+    vscode.window.showInformationMessage(done.length === loose.length ? 'Done: only you can read them now.'
+      : "Some couldn't be changed; Show Status has the details.")
+  } else if (choice === "Don't Ask Again" && context && context.globalState) {
+    await context.globalState.update(key, true)
+  }
+}
+
+function removeStaleTemps() {
+  const p = profilesLib.paths()
+  let n = 0
+  n += fsx.removeStaleTemps(path.dirname(p.claudeJson), ['.claude.json'])
+  n += fsx.removeStaleTemps(p.claudeDir, ['settings.json', '.credentials.json'])
+  for (const sub of ['', 'profiles', 'usage', 'recovery']) n += fsx.removeStaleTemps(path.join(root(), sub))
+  const old = path.join(root(), 'registry.json.tmp')
+  try { if (Date.now() - fs.statSync(old).mtimeMs > 60000) { fs.rmSync(old, { force: true }); n++ } } catch {  }
+  if (n) log('removed ' + n + ' temp file(s) left by interrupted writes')
+  return n
 }
 
 async function showStatus() {
@@ -919,6 +1433,16 @@ async function showStatus() {
   output.appendLine('platform: ' + process.platform + '  ·  saved-account encryption: ' + secretsLib.describe())
   output.appendLine('live login read from: ' + credstore.describe(null))
   output.appendLine('root: ' + root())
+  const regErr = store.registryError(root())
+  if (regErr) output.appendLine('REGISTRY ERROR: ' + regErr)
+  for (const g of profilesLib.duplicates(root())) {
+    output.appendLine('SAVED TWICE (one account, several names; forget all but one): ' + g.join(', '))
+  }
+  const loose = looseFiles()
+  if (loose.length) {
+    output.appendLine('READABLE BY OTHER USERS: ' + loose.join(', '))
+    offerPrivateFiles(null, true).catch(() => {})
+  }
 
   const active = profilesLib.activeProfile(root())
   const st = await vscode.window.withProgress(
@@ -959,7 +1483,7 @@ async function showStatus() {
 async function openConfigFile() {
   store.ensureRoot(root())
   const p = path.join(root(), 'registry.json')
-  if (!fs.existsSync(p)) store.writeRegistry(root(), store.readRegistry(root()))
+  if (!fs.existsSync(p)) fsx.writeJsonAtomic(p, store.readRegistry(root()), { mode: 0o600, forceMode: true })
   const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p))
   await vscode.window.showTextDocument(doc)
 }
@@ -1052,6 +1576,7 @@ function pageHtml(webview, layout) {
 }
 
 function pageState() {
+  const contextOf = contextByAccount()
   const active = profilesLib.activeProfile(root())
   const rows = snapshotRows()
   const best = rows.length ? trackerLib.mostRoom(rows) : null
@@ -1063,11 +1588,18 @@ function pageState() {
 
   return {
     now: Date.now(),
+    registryError: store.registryError(root()),
+    duplicates: profilesLib.duplicates(root()).map((g) => g.map(labelOf)),
     edition,
     version,
     tracking: trackingEnabled(),
     updating: updatingAll || (trackerRunning && trackerManual),
-    features: { artifacts: editionLib.hasFeature(edition, 'artifacts') },
+    features: {
+      artifacts: editionLib.hasFeature(edition, 'artifacts'),
+      spareLogin: editionLib.hasFeature(edition, 'spareLogin'),
+      startSession: editionLib.hasFeature(edition, 'startSession'),
+      context: editionLib.hasFeature(edition, 'context'),
+    },
     live: { email: (id && id.email) || null, saved: !!active, label: active ? labelOf(active) : null },
     window: {
       folder: here,
@@ -1091,6 +1623,8 @@ function pageState() {
         needsLogin: !!p.needsLogin,
         remoteOff: store.getRemote(root(), p.name) === 'off',
         artifactsOff: store.getArtifacts(root(), p.name) === 'off',
+        starting: startingSessions.has(p.name),
+        context: contextOf[p.name] || null,
         session: r.session || null,
         weekly: r.weekly || null,
         fetchedAtMs: r.fetchedAtMs || null,
@@ -1131,6 +1665,8 @@ const PAGE_ACTIONS = {
   forget: (m) => forgetAccount(m.name),
   windowLogin: (m) => windowLogin(m.name),
   forgetWindowLogin: (m) => forgetWindowLogin(m.name),
+  spareLogin: (m) => (editionLib.hasFeature(edition, 'spareLogin') ? makeSpareLogin(m.name) : null),
+  startSession: (m) => startSessionFor(m.name),
   pin: () => pinFolder(),
   unpin: (m) => unpinFolder(m.folder),
   status: () => showStatus(),
@@ -1214,6 +1750,11 @@ function activate(context) {
     log('folder pin: ' + JSON.stringify({ source: pinState.source, name: pinState.name, ready: pinState.ready,
       problem: pinState.problem, claudeWasActive: pinState.claudeWasActive, error: pinState.error }))
   }
+  if (pinState && pinState.problem === 'login-unknown') {
+    vscode.window.showWarningMessage('This folder is pinned to "' + pinState.name + '", but its window login couldn\'t be ' +
+      'checked (the Keychain may be locked). The window uses the pinned account; if Claude Code says it is signed out, ' +
+      'unlock the Keychain and reload.')
+  }
   if (pinState && pinState.problem === 'no-login') {
     const n = pinState.name
     vscode.window.showWarningMessage('This folder is pinned to "' + n + '", which has no window login yet, ' +
@@ -1223,16 +1764,16 @@ function activate(context) {
   }
 
   store.ensureRoot(root())
+  secretsLib.addGuardRoot(root())
 
-  if (store.getMode(root()) !== 'login') {
-    store.setMode(root(), 'login')
-    log('switched to global mode (the older per-window modes were removed)')
-  }
-  if (envBridge.currentConfigDir(vscode)) {
-    envBridge.setConfigDir(vscode, null)
-      .then(() => log('cleared a machine-wide CLAUDE_CONFIG_DIR override'))
-      .catch((e) => log('could not clear config dir override: ' + (e && e.message)))
-  }
+  try {
+    if (store.getMode(root()) !== 'login') {
+      store.setMode(root(), 'login')
+      log('switched to global mode (the older per-window modes were removed)')
+    }
+  } catch (e) { log('mode: ' + (e && e.message)) }
+  extContext = context
+  resolveMachineConfigDir(false).catch((e) => log('could not clear config dir override: ' + (e && e.message)))
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
   statusBar.command = pinnedHere() ? 'claudeswitcher.pinFolder' : 'claudeswitcher.globalSwitch'
@@ -1244,9 +1785,16 @@ function activate(context) {
   usageBar.name = 'Claude Usage'
   context.subscriptions.push(usageBar)
 
+  contextBar = null
+  if (editionLib.hasFeature(edition, 'context')) {
+    contextBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99.5)
+    contextBar.name = 'Claude Context'
+    context.subscriptions.push(contextBar)
+  }
+
   const cmds = {
     openAccounts, globalSwitch, globalAdd: addAccount, pinFolder, refreshAllAccounts, showStatus,
-    switchTo, refreshUsage, relogin, windowLogin, openAccountsTab,
+    switchTo, refreshUsage, relogin, windowLogin, openAccountsTab, startSession: startSessionFor,
   }
   for (const id of Object.keys(cmds)) {
     if (!editionLib.includes(edition, id)) continue
@@ -1264,6 +1812,12 @@ function activate(context) {
   try { applyRemotePreference(profilesLib.activeProfile(root())) } catch (e) { log('remote pref: ' + e.message) }
   try { applyArtifactPreference(profilesLib.activeProfile(root())) } catch (e) { log('artifacts pref: ' + e.message) }
 
+  try { cleanupSpares() } catch (e) { log('spare cleanup: ' + (e && e.message)) }
+  try { kickoffLib.cleanup(root()) } catch (e) { log('session cleanup: ' + (e && e.message)) }
+  try { removeStaleTemps() } catch (e) { log('temp cleanup: ' + (e && e.message)) }
+  const privacyTimer = setTimeout(() => { offerPrivateFiles(context, false).catch(() => {}) }, 5000)
+  if (privacyTimer.unref) privacyTimer.unref()
+  context.subscriptions.push({ dispose: () => clearTimeout(privacyTimer) })
   const recovered = syncStagedLogins()
   if (recovered.length) {
     vscode.window.showInformationMessage('Added to the account switcher: ' + recovered.join(', ') + '.')
@@ -1277,9 +1831,17 @@ function activate(context) {
   } catch (e) { log('registry watch unavailable: ' + (e && e.message)) }
 
   usageTimer = setInterval(() => updateUsageBar(), 60000)
+  const contextTimer = setInterval(refreshContext, 30000)
+  const compactTimer = contextBar ? setInterval(checkCompacting, 1000) : null
+  context.subscriptions.push({ dispose: () => {
+    clearInterval(contextTimer)
+    if (compactTimer) clearInterval(compactTimer)
+    if (compactAnim) { clearInterval(compactAnim); compactAnim = null }
+  } })
+  refreshContext()
   context.subscriptions.push({ dispose: () => clearInterval(usageTimer) })
   context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => {
-    if (s.focused) { updateUsageBar(); postState() }
+    if (s.focused) { updateUsageBar(); refreshContext() }
   }))
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('claudeswitcher.trackAllAccounts')) { refreshAll(); trackerTick() }
@@ -1309,6 +1871,10 @@ module.exports = {
   _test: {
     stopLoginWatchers,
     syncStagedLogins,
+    cleanupSpares,
+    offerPrivateFiles,
+    removeStaleTemps,
+    setKickoffRun: (fn) => { kickoffRun = fn },
     settle: () => Promise.all([...pendingLogins]),
     setLoginPollMs: (ms) => { loginPollMs = ms },
     trackerTick,

@@ -1,3 +1,5 @@
+require('./fake-security')
+
 const assert = require('assert')
 const fs = require('fs')
 const path = require('path')
@@ -106,6 +108,11 @@ check('the release shows only promoted ones', edition.FEATURES.every((f) =>
   edition.hasFeature(edition.MAIN, f) === edition.MAIN_FEATURES.includes(f)))
 check('the Artifacts switch was promoted into the release in 1.1.0', edition.hasFeature(edition.EXPERIMENTAL, 'artifacts') &&
   edition.hasFeature(edition.MAIN, 'artifacts'))
+check('"Make a login for another PC" was promoted into the release in 1.2.0',
+  edition.hasFeature(edition.EXPERIMENTAL, 'spareLogin') && edition.hasFeature(edition.MAIN, 'spareLogin'))
+check('so was "Start a 5-hour session", with its command', edition.hasFeature(edition.EXPERIMENTAL, 'startSession') &&
+  edition.hasFeature(edition.MAIN, 'startSession') && edition.includes(edition.MAIN, 'startSession'))
+check('and the chat context display', edition.hasFeature(edition.EXPERIMENTAL, 'context') && edition.hasFeature(edition.MAIN, 'context'))
 check('an unknown feature is off everywhere', !edition.hasFeature(edition.EXPERIMENTAL, 'nope') && !edition.hasFeature(edition.MAIN, 'nope'))
 
 console.log('\n-- a promoted command that package.json forgot is caught --')

@@ -1,8 +1,10 @@
+require('./fake-security')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
 const profiles = require('../lib/profiles.js')
+const credstore = require('../lib/credstore.js')
 
 const TMP = path.join(os.tmpdir(), 'cs-prof-' + Date.now())
 const HOME = path.join(TMP, 'home')
@@ -19,10 +21,10 @@ const P = profiles.paths(OPTS)
 
 function writeLogin(email, org, token) {
   fs.mkdirSync(P.claudeDir, { recursive: true })
-  fs.writeFileSync(P.credPath, JSON.stringify({
+  credstore.write(null, {
     claudeAiOauth: { accessToken: token, refreshToken: token + '-r', expiresAt: 123 },
     trustedDeviceToken: 'device-' + email,
-  }))
+  }, OPTS)
 }
 
 function writeConfig(email, org, extra) {
@@ -78,7 +80,7 @@ function main() {
   const applied = profiles.apply(ROOT, 'acctA', OPTS)
   check('switch reports account A', applied.email === 'a@example.com', JSON.stringify(applied))
 
-  const creds = JSON.parse(fs.readFileSync(P.credPath, 'utf8'))
+  const creds = credstore.read(null, OPTS)
   check('credentials are now A', creds.claudeAiOauth.accessToken === 'TOKEN-A',
     creds.claudeAiOauth.accessToken)
   check('trustedDeviceToken swapped too', creds.trustedDeviceToken === 'device-a@example.com')
@@ -103,7 +105,7 @@ function main() {
 
   console.log('\n-- switch back to B --')
   profiles.apply(ROOT, 'acctB', OPTS)
-  const creds2 = JSON.parse(fs.readFileSync(P.credPath, 'utf8'))
+  const creds2 = credstore.read(null, OPTS)
   const cfg2 = JSON.parse(fs.readFileSync(P.claudeJson, 'utf8'))
   check('credentials are B again', creds2.claudeAiOauth.accessToken === 'TOKEN-B')
   check('identity is B again', cfg2.oauthAccount.emailAddress === 'b@example.com')
@@ -116,7 +118,7 @@ function main() {
   profiles.capture(ROOT, 'acctB', OPTS)
   profiles.apply(ROOT, 'acctA', OPTS)
   profiles.apply(ROOT, 'acctB', OPTS)
-  const creds3 = JSON.parse(fs.readFileSync(P.credPath, 'utf8'))
+  const creds3 = credstore.read(null, OPTS)
   check('rotated token preserved through a round trip',
     creds3.claudeAiOauth.accessToken === 'TOKEN-B-ROTATED', creds3.claudeAiOauth.accessToken)
 
@@ -124,7 +126,7 @@ function main() {
   profiles.remove(ROOT, 'acctA')
   check('profile gone', !profiles.exists(ROOT, 'acctA'))
   check('meta gone', !fs.existsSync(path.join(ROOT, 'profiles', 'acctA.meta.json')))
-  check('live login untouched by removal', fs.existsSync(P.credPath))
+  check('live login untouched by removal', credstore.exists(null, OPTS))
 
   console.log('\n-- importFromDir: move a staged login into a profile --')
   const stage = path.join(TMP, 'stage-c')
@@ -145,7 +147,7 @@ function main() {
     !fs.readFileSync(path.join(ROOT, 'profiles', 'acctC.enc')).toString('utf8').includes('TOKEN-C'))
 
   profiles.apply(ROOT, 'acctC', OPTS)
-  const credsC = JSON.parse(fs.readFileSync(P.credPath, 'utf8'))
+  const credsC = credstore.read(null, OPTS)
   const cfgC = JSON.parse(fs.readFileSync(P.claudeJson, 'utf8'))
   check('imported profile applies as the live login', credsC.claudeAiOauth.accessToken === 'TOKEN-C')
   check('staged project state was not carried over', cfgC.projects && !cfgC.projects.should)
@@ -156,9 +158,14 @@ function main() {
   fs.writeFileSync(path.join(stageD, '.credentials.json'), JSON.stringify({
     claudeAiOauth: { accessToken: 'TOKEN-D', refreshToken: 'REFRESH-D' },
   }))
+  let noId = null
+  try { profiles.importFromDir(ROOT, 'acctD', stageD, { fallback: { email: 'd@example.com', org: 'Org D' } }) } catch (e) { noId = e }
+  check('a login without account details is not imported yet', noId && noId.code === 'ENOIDENTITY' && !profiles.exists(ROOT, 'acctD'))
+  check('and its login is left where it is', fs.existsSync(path.join(stageD, '.credentials.json')))
+  fs.writeFileSync(path.join(stageD, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'd@example.com', organizationName: 'Org D', accountUuid: 'uuid-d' } }))
   profiles.importFromDir(ROOT, 'acctD', stageD, { fallback: { email: 'd@example.com', org: 'Org D' } })
   check('copy mode leaves the source login', fs.existsSync(path.join(stageD, '.credentials.json')))
-  check('fallback identity used when .claude.json is missing',
+  check('once Claude Code has written them, it is imported',
     (profiles.list(ROOT).find((p) => p.name === 'acctD') || {}).email === 'd@example.com')
 
   console.log('\n-- importFromDir: nothing to import --')
@@ -257,6 +264,125 @@ function main() {
   fs.writeFileSync(settingsFile, '\uFEFF{"theme":"dark"}')
   check('a byte-order mark is not mistaken for damage', artifacts.setOff(true, OPTS).changed === true &&
     JSON.parse(fs.readFileSync(settingsFile, 'utf8')).theme === 'dark')
+
+  console.log('\n-- one account\'s login is never saved under another (audit #1, #2) --')
+  {
+    const secrets = require('../lib/secrets.js')
+    const H2 = path.join(TMP, 'home2')
+    const R2 = path.join(TMP, 'root2')
+    fs.mkdirSync(H2, { recursive: true })
+    fs.mkdirSync(R2, { recursive: true })
+    const O2 = { home: H2 }
+    const P2 = profiles.paths(O2)
+    const live = (email, uuid, rt) => {
+      fs.mkdirSync(P2.claudeDir, { recursive: true })
+      credstore.write(null, { claudeAiOauth: { accessToken: 'AT-' + rt, refreshToken: rt, expiresAt: Date.now() + 3600e3 } }, O2)
+      let prev = { projects: { '/w': { allowedTools: ['Bash'] } }, mcpServers: { s: { command: 'x' } } }
+      try { prev = JSON.parse(fs.readFileSync(P2.claudeJson, 'utf8')) || prev } catch {  }
+      fs.writeFileSync(P2.claudeJson, JSON.stringify({ ...prev, oauthAccount: { emailAddress: email, organizationName: 'Org', accountUuid: uuid }, userID: 'u-' + uuid }, null, 2))
+    }
+    const saveRaw = (name, payload) => fs.writeFileSync(path.join(profiles.profilesDir(R2), name + '.enc'),
+      secrets.protect(Buffer.from(JSON.stringify({ capturedAt: new Date().toISOString(), ...payload }))))
+    const rtOf = (n) => profiles.readPayload(R2, n).credentials.claudeAiOauth.refreshToken
+    const liveRt = () => credstore.read(null, O2).claudeAiOauth.refreshToken
+    const code = (fn) => { try { fn(); return null } catch (e) { return e.code || e.message } }
+
+    live('one@x.co', 'uuid-1', 'RT-1'); profiles.capture(R2, 'one', O2)
+    live('two@x.co', 'uuid-2', 'RT-2'); profiles.capture(R2, 'two', O2)
+    live('one@x.co', 'uuid-1b', 'RT-1B'); profiles.capture(R2, 'one-b', O2)
+    check('one email in two organizations: the live one is told apart by its uuid', profiles.activeProfile(R2, O2) === 'one-b', profiles.activeProfile(R2, O2))
+    check('saving the live login over a different account is refused',
+      code(() => profiles.capture(R2, 'one', O2)) === 'EACCOUNTMISMATCH' && rtOf('one') === 'RT-1')
+    check('so is saving it under a second name', code(() => profiles.capture(R2, 'copy', O2)) === 'EACCOUNTMISMATCH' && !profiles.exists(R2, 'copy'))
+    check('a duplicate account found by uuid, not just email', profiles.findSameAccount(R2, { accountUuid: 'uuid-2', email: 'x@y.z' }) === 'two')
+
+    const noId = JSON.parse(fs.readFileSync(P2.claudeJson, 'utf8'))
+    delete noId.oauthAccount
+    fs.writeFileSync(P2.claudeJson, JSON.stringify(noId))
+    check('a login without account details is never saved', code(() => profiles.capture(R2, 'one-b', O2)) === 'ENOIDENTITY' && rtOf('one-b') === 'RT-1B')
+    live('one@x.co', 'uuid-1b', 'RT-1B')
+    profiles.capture(R2, 'one-b', O2)
+    check('a saved account is backed up before it is overwritten',
+      fs.readdirSync(path.join(R2, 'backups')).some((f) => /^one-b-.*\.enc$/.test(f)))
+
+    saveRaw('bare', { credentials: { claudeAiOauth: { accessToken: 'AT-N', refreshToken: 'RT-N' } }, identity: {} })
+    check('an account saved without its details is not switched to', code(() => profiles.apply(R2, 'bare', O2)) === 'ENOIDENTITY' && liveRt() === 'RT-1B')
+
+    for (const [what, text] of [['half-written', '{"projects": {"/w": {'], ['empty', ''], ['null', 'null']]) {
+      fs.writeFileSync(P2.claudeJson, text)
+      const c = code(() => profiles.apply(R2, 'two', O2))
+      check('a ' + what + ' ~/.claude.json stops the switch, and is left exactly as it was',
+        c === 'EUNREADABLEJSON' && fs.readFileSync(P2.claudeJson, 'utf8') === text && liveRt() === 'RT-1B', String(c))
+    }
+    fs.writeFileSync(P2.claudeJson, '﻿' + JSON.stringify({ projects: { '/w': { allowedTools: ['Bash'] } }, mcpServers: { s: {} },
+      oauthAccount: { emailAddress: 'one@x.co', accountUuid: 'uuid-1b' }, userID: 'u-1b' }))
+    profiles.apply(R2, 'two', O2)
+    const afterBom = JSON.parse(fs.readFileSync(P2.claudeJson, 'utf8'))
+    check('a byte-order mark is not damage: the switch goes ahead and keeps everything else',
+      afterBom.oauthAccount.accountUuid === 'uuid-2' && afterBom.projects['/w'] && afterBom.mcpServers.s && liveRt() === 'RT-2')
+
+    saveRaw('nouid', { credentials: { claudeAiOauth: { accessToken: 'AT-3', refreshToken: 'RT-3' } },
+      identity: { oauthAccount: { emailAddress: 'three@x.co', accountUuid: 'uuid-3' } } })
+    profiles.apply(R2, 'nouid', O2)
+    check('identity keys the account lacks are removed, not left over from the previous one',
+      !('userID' in JSON.parse(fs.readFileSync(P2.claudeJson, 'utf8'))))
+
+    live('two@x.co', 'uuid-2', 'RT-2')
+    profiles.apply(R2, 'two', O2)
+    fs.copyFileSync(path.join(profiles.profilesDir(R2), 'two.enc'), path.join(profiles.profilesDir(R2), 'two-old.enc'))
+    profiles.writeMeta(R2, 'two-old', { ...profiles.readMeta(R2, 'two'), capturedAt: '2020-01-01T00:00:00.000Z' })
+    check('with one account saved twice, the live one is the copy saved last', profiles.activeProfile(R2, O2) === 'two')
+    check('saving the live login into it still works (no dead end)', code(() => profiles.capture(R2, 'two', O2)) === null)
+    check('and the duplicate is reported', JSON.stringify(profiles.duplicates(R2)) === '[["two","two-old"]]', JSON.stringify(profiles.duplicates(R2)))
+    profiles.remove(R2, 'two-old')
+
+    const stageX = path.join(TMP, 'stage-x')
+    fs.mkdirSync(stageX, { recursive: true })
+    credstore.write(stageX, { claudeAiOauth: { accessToken: 'AT-X', refreshToken: 'RT-X' } }, O2)
+    profiles.importFromDir(R2, 'xen', stageX, { move: true, confirmedEmail: 'x@x.co', fallback: { org: 'Org X' } })
+    check('a confirmed sign-in without written details is named by the email the CLI reported',
+      profiles.readMeta(R2, 'xen').email === 'x@x.co' && profiles.readPayload(R2, 'xen').identity.oauthAccount.emailAddress === 'x@x.co')
+
+    if (process.platform !== 'win32') {
+      fs.chmodSync(P2.claudeJson, 0o600)
+      profiles.apply(R2, 'two', O2)
+      check('~/.claude.json stays private (0600) after a switch', (fs.statSync(P2.claudeJson).mode & 0o777) === 0o600,
+        (fs.statSync(P2.claudeJson).mode & 0o777).toString(8))
+      const real = path.join(TMP, 'dotfiles-claude.json')
+      fs.renameSync(P2.claudeJson, real)
+      fs.symlinkSync(real, P2.claudeJson)
+      profiles.apply(R2, 'nouid', O2)
+      check('a symlinked ~/.claude.json stays a link, and the file it points to is what changes',
+        fs.lstatSync(P2.claudeJson).isSymbolicLink() && JSON.parse(fs.readFileSync(real, 'utf8')).oauthAccount.accountUuid === 'uuid-3')
+      fs.rmSync(P2.claudeJson)
+      fs.renameSync(real, P2.claudeJson)
+
+      if (!(process.getuid && process.getuid() === 0)) {
+        const before = liveRt()
+        fs.chmodSync(H2, 0o500)
+        let failed = false
+        try { profiles.apply(R2, 'two', O2) } catch { failed = true }
+        fs.chmodSync(H2, 0o700)
+        check('if ~/.claude.json can\'t be written, the previous login is put back', failed && liveRt() === before, liveRt())
+      }
+    } else {
+      const twoRt = profiles.readPayload(R2, 'two').credentials.claudeAiOauth.refreshToken
+      if (liveRt() === twoRt) profiles.apply(R2, 'nouid', O2)
+      const marker = path.join(TMP, 'holding')
+      const holder = require('child_process').spawn(process.execPath, ['-e',
+        'const fs = require("fs"); const fd = fs.openSync(' + JSON.stringify(P2.claudeJson) + ', "r");' +
+        'fs.writeFileSync(' + JSON.stringify(marker) + ', ""); setTimeout(() => fs.closeSync(fd), 15000)'])
+      const fsx = require('../lib/fsx.js')
+      for (let i = 0; i < 200 && !fs.existsSync(marker); i++) fsx.sleepSync(25)
+      const before = liveRt()
+      const cfgBefore = fs.readFileSync(P2.claudeJson, 'utf8')
+      let failed = null
+      try { profiles.apply(R2, 'two', O2) } catch (e) { failed = e.code || e.message }
+      holder.kill()
+      check('if ~/.claude.json can\'t be written, the previous login is put back',
+        failed === 'EPERM' && before !== twoRt && liveRt() === before && fs.readFileSync(P2.claudeJson, 'utf8') === cfgBefore, String(failed))
+    }
+  }
 
   console.log('\n===== ' + pass + ' passed, ' + fail + ' failed =====')
   fs.rmSync(TMP, { recursive: true, force: true })

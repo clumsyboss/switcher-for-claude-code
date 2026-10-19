@@ -2,7 +2,7 @@
   "name": "claude-account-switcher",
   "displayName": "Switcher for Claude Code (Experimental)",
   "description": "Switch between Claude accounts in VS Code, see every account's limits, and pin folders to their own account.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "local",
   "private": true,
   "license": "MIT",
@@ -14,7 +14,7 @@
     "edition": "experimental"
   },
   "scripts": {
-    "test": "node test/harness.js && node test/profiles.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js",
+    "test": "node test/harness.js && node test/profiles.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js",
     "stage": "node build.js --no-package",
     "package": "node build.js",
     "package:main": "node build.js main",
@@ -87,6 +87,11 @@
         "category": "Claude Accounts"
       },
       {
+        "command": "claudeswitcher.startSession",
+        "title": "Claude Accounts: Start a 5-Hour Session",
+        "category": "Claude Accounts"
+      },
+      {
         "command": "claudeswitcher.openAccountsTab",
         "title": "Open as a Tab",
         "category": "Claude Accounts",
@@ -151,7 +156,8 @@
         { "command": "claudeswitcher.refreshUsage", "when": "false" },
         { "command": "claudeswitcher.relogin", "when": "false" },
         { "command": "claudeswitcher.windowLogin", "when": "false" },
-        { "command": "claudeswitcher.openAccountsTab", "when": "false" }
+        { "command": "claudeswitcher.openAccountsTab", "when": "false" },
+        { "command": "claudeswitcher.startSession", "when": "false" }
       ],
       "view/title": [
         { "command": "claudeswitcher.refreshAllAccounts", "when": "view == claudeswitcher.accountsView", "group": "navigation@1" },
