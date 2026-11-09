@@ -77,6 +77,28 @@ console.log('isCompacting')
   check('/compacting is not /compact', !compacting('prefix', [reply(200000, at), q('enqueue', '/compacting', at)]))
 }
 
+console.log('automatic compaction')
+{
+  const later = { status: 'busy', now: Date.now() + 60000 }
+  const at = '2026-10-19T10:00:01Z'
+  const result = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }
+  const attachment = { type: 'attachment' }
+  const toolUse = (used) => ({ ...reply(used, at), message: { ...reply(used, at).message, content: [{ type: 'tool_use', id: 't1', name: 'Bash' }] } })
+  const auto = (name, records) => {
+    const [c] = ctx.withFill([ctx.readChat(chat(name, records))])
+    return ctx.isCompacting(c, later)
+  }
+  check('one that just stopped before its next request, within reach of the limit, is',
+    auto('auto', [toolUse(960475), result, attachment]))
+  check('a turn that has ended is not, though background agents keep the chat busy',
+    !auto('ended', [toolUse(870000), result, reply(870500, at), { type: 'system', subtype: 'stop_hook_summary' }]))
+  check('nor a request already on its way (Claude Code logs it as it sends it)',
+    !auto('sent', [toolUse(960475), result, attachment, { type: 'api-request-blob' }, { type: 'api-request' }]))
+  check('nor a tool still running', !auto('running', [reply(960000, at), toolUse(960475)]))
+  check('nor a chat at 87% of 1M: Claude Code compacts within about 33k of the limit',
+    !auto('room', [toolUse(870000), result, attachment]))
+}
+
 console.log('project folder names (L2)')
 {
   check('a short path: every non-alphanumeric character becomes "-"', ctx.projectKey('/Users/me/my app') === '-Users-me-my-app')

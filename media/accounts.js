@@ -51,6 +51,12 @@
     play: '<path d="M7 4v16l13-8Z"/>',
     pc: '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m9 10 3-3 3 3"/><path d="M12 7v6"/>',
     check: '<path d="M20 6 9 17l-5-5"/>',
+    upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+    up: '<path d="m18 15-6-6-6 6"/>',
+    grip: '<circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    down: '<path d="m6 9 6 6 6-6"/>',
   }
   function icon(name, cls) {
     const span = document.createElement('span')
@@ -131,14 +137,15 @@
   }
   function openMenu(kind, name, btn, focusIndex) {
     const a = ((state && state.accounts) || []).find((x) => x.name === name)
-    if (!a) return
-    const el = kind === 'pins' ? pinsPopover(a) : actionsMenu(a)
+    const el = kind === 'ac-mode' ? modeMenu() : kind === 'ac-pick' ? pickMenu() : kind === 'ac-when' ? whenMenu()
+      : !a ? null : kind === 'pins' ? pinsPopover(a) : actionsMenu(a)
+    if (!el) return
     layer.replaceChildren(el)
     menu = { key: kind + ':' + name, kind, name, el, btn }
     btn.setAttribute('aria-expanded', 'true')
     place()
     if (focusIndex !== null) {
-      const items = el.querySelectorAll('[role="menuitem"]')
+      const items = el.querySelectorAll('[role^="menuitem"]')
       const target = (focusIndex >= 0 && items[Math.min(focusIndex, items.length - 1)]) || el
       target.focus({ preventScroll: true })
     }
@@ -151,7 +158,7 @@
     const vh = document.documentElement.clientHeight
     const w = el.offsetWidth
     const ht = el.offsetHeight
-    const left = Math.max(8, Math.min(r.right - w, vw - w - 8))
+    const left = Math.max(8, Math.min(menu.kind.startsWith('ac-') ? r.left : r.right - w, vw - w - 8))
     const up = r.bottom + 6 + ht > vh - 8 && r.top - 6 - ht >= 8
     el.style.setProperty('left', left + 'px')
     el.style.setProperty('top', (up ? r.top - 6 - ht : r.bottom + 6) + 'px')
@@ -169,7 +176,7 @@
     if (!menu) return
     const btn = app.querySelector('[data-menu="' + CSS.escape(menu.key) + '"]')
     if (!btn) { closeMenu(false); return }
-    const items = [...menu.el.querySelectorAll('[role="menuitem"]')]
+    const items = [...menu.el.querySelectorAll('[role^="menuitem"]')]
     const at = items.indexOf(document.activeElement)
     const { kind, name } = menu
     menu = null
@@ -185,6 +192,15 @@
       item('login', 'Sign in again', () => send('relogin', { name: a.name })),
       state.features && state.features.spareLogin
         ? item('pc', 'Make a login for another PC…', () => send('spareLogin', { name: a.name }))
+        : null,
+      state.features && state.features.transfer
+        ? item('upload', 'Move to another PC…', () => send('moveOut', { name: a.name }))
+        : null,
+      state.features && state.features.keepAlive
+        ? h('button', { role: 'menuitemcheckbox', 'aria-checked': a.keepAlive ? 'true' : 'false', tabindex: '-1',
+          title: 'Starts the next 5-hour session as soon as one ends',
+          onclick: () => { closeMenu(false); send('keepAlive', { name: a.name, on: !a.keepAlive }) } },
+          icon(a.keepAlive ? 'check' : 'play', 'sm'), a.keepAlive ? 'Keep alive: on' : 'Keep alive')
         : null,
       h('hr'),
       h('div', { class: 'hint', text: wl && wl.signedIn
@@ -250,9 +266,10 @@
       : null
     const running = !!(a.session && !a.session.resetSince && a.session.resetsAt && Date.parse(a.session.resetsAt) > now())
     const startBtn = s.features && s.features.startSession && !a.active && !a.needsLogin
-      ? h('button', { class: 'icon-btn start', disabled: running || a.starting || null,
-        title: a.starting ? 'Starting a 5-hour session…'
-          : running ? 'Session running · resets in ' + (until(Date.parse(a.session.resetsAt)) || 'a moment') : 'Start a 5-hour session',
+      ? h('button', { class: 'icon-btn start' + (a.keepAlive ? ' keep' : ''), disabled: running || a.starting || null,
+        title: (a.starting ? 'Starting a 5-hour session…'
+          : running ? 'Session running · resets in ' + (until(Date.parse(a.session.resetsAt)) || 'a moment') : 'Start a 5-hour session') +
+          (a.keepAlive ? ' · Keep alive is on' : ''),
         'aria-label': (running ? '5-hour session running for ' : 'Start a 5-hour session for ') + a.label,
         onclick: () => send('startSession', { name: a.name }) },
       icon(a.starting ? 'refresh' : 'play', a.starting ? 'sm spin' : 'sm'))
@@ -342,6 +359,180 @@
     return null
   }
 
+  const AC_MODES = [
+    ['ask', 'Ask me what to do', 'Choose an action from the VS Code notification'],
+    ['wait', 'Auto-continue on the same account', 'Wait for the limit to reset and continue'],
+    ['switch', 'Auto-continue on a different account', 'Switch to another account and continue'],
+    ['off', 'Do nothing', 'Leave the chat stopped'],
+  ]
+  const AC_PICKS = [
+    ['room', 'The account with the most limit', 'Recommended'],
+    ['order', 'The first account in my order', 'Uses accounts you chose'],
+  ]
+  const AC_EARLY_MODES = [
+    ['switch', 'Switch to a different account', 'Work carries on, on another account'],
+    ['ask', 'Ask me what to do', 'Choose an action from the VS Code notification'],
+  ]
+  const EARLY_MIN = 50
+  const EARLY_MAX = 90
+  const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1)
+  const acLabel = (list, v) => lower((list.find((x) => x[0] === v) || list[0])[1])
+
+  function choiceMenu(label, list, current, pick) {
+    return h('div', { class: 'menu choices-menu', role: 'menu', 'aria-label': label, tabindex: '-1' },
+      list.map(([v, title, sub]) => h('button', { role: 'menuitemradio', 'aria-checked': String(v === current), tabindex: '-1',
+        onclick: () => { closeMenu(false); pick(v) } },
+      h('span', { class: 'mi-check' }, v === current ? icon('check', 'sm') : null),
+      h('span', { class: 'mi-text' }, h('span', { text: title }), h('span', { class: 'mi-sub', text: sub })))))
+  }
+
+  function modeMenu() {
+    const ac = state.autoContinue
+    return choiceMenu('What to do', ac.early ? AC_EARLY_MODES : AC_MODES, ac.mode, (v) => {
+      if (v === 'switch' && ac.mode !== 'switch') switchDialog()
+      else if (v !== ac.mode) send('autoContinue', { mode: v })
+    })
+  }
+
+  function whenMenu() {
+    const ac = state.autoContinue
+    let v = ac.early || 80
+    const value = h('span', { class: 'ws-val', text: v + '%' })
+    const slider = h('input', { type: 'range', class: 'ws-range', min: String(EARLY_MIN), max: String(EARLY_MAX), step: '1',
+      value: String(v), 'aria-label': 'Share of the 5-hour limit to switch at' })
+    slider.addEventListener('input', () => { v = Number(slider.value); value.textContent = v + '%' })
+    slider.addEventListener('change', () => { if (ac.early && v !== ac.early) send('autoContinue', { early: v }) })
+    const item = (on, title, sub, pick) => h('button', { role: 'menuitemradio', 'aria-checked': String(on), tabindex: '-1',
+      onclick: () => { closeMenu(false); pick() } },
+    h('span', { class: 'mi-check' }, on ? icon('check', 'sm') : null),
+    h('span', { class: 'mi-text' }, h('span', { text: title }), h('span', { class: 'mi-sub', text: sub })))
+    return h('div', { class: 'menu choices-menu when-menu', role: 'menu', 'aria-label': 'When', tabindex: '-1' },
+      item(!ac.early, 'Hits its limit', 'Act once the limit has stopped the chat', () => { if (ac.early) send('autoContinue', { early: null }) }),
+      item(!!ac.early, 'Reaches a share of its limit', 'Switch early, so work doesn’t stop', () => chooseEarly(v)),
+      h('div', { class: 'ws-row' }, h('span', { class: 'ws-end', text: EARLY_MIN + '%' }), slider,
+        h('span', { class: 'ws-end', text: EARLY_MAX + '%' }), value),
+      h('div', { class: 'mi-sub ws-note', text: 'The 5-hour limit switches at this share, the weekly limit at 95%.' }))
+  }
+
+  function chooseEarly(v) {
+    const ac = state.autoContinue
+    if (ac.mode === 'switch' || ac.mode === 'ask') send('autoContinue', { early: v })
+    else switchDialog({ early: v })
+  }
+
+  function pickMenu() {
+    const ac = state.autoContinue
+    return choiceMenu('Which account', AC_PICKS, ac.pick, (v) => {
+      if (v === 'order') orderDialog({ mode: 'switch' })
+      else if (v !== ac.pick) send('autoContinue', { pick: 'room' })
+    })
+  }
+
+  function switchDialog(extra) {
+    closeEdit()
+    let pick = state.autoContinue.pick
+    const list = h('div', { class: 'rc-list', role: 'radiogroup', 'aria-label': 'Switch to which account?' })
+    const next = h('button', { class: 'btn primary' })
+    const draw = () => {
+      const card = (v, title, text) => h('button', { class: 'radio-card' + (pick === v ? ' on' : ''), role: 'radio',
+        'aria-checked': String(pick === v), onclick: () => { pick = v; draw() } },
+      h('span', { class: 'dot' }), h('span', { class: 'rc-text' }, h('strong', { text: title }), h('span', { text: text })))
+      list.replaceChildren(
+        card('room', 'The account with the most limit', 'Whichever of your accounts has used the least. Recommended.'),
+        card('order', 'In my order', 'You choose the order and the accounts Claude uses'))
+      next.textContent = pick === 'order' ? 'Next: Set the Order' : 'Done'
+    }
+    next.addEventListener('click', () => {
+      if (pick === 'order') orderDialog(Object.assign({ mode: 'switch' }, extra || {}))
+      else { send('autoContinue', Object.assign({ mode: 'switch', pick: 'room' }, extra || {})); closeEdit() }
+    })
+    draw()
+    showDialog(h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dlg-t' },
+      h('div', null, h('h3', { id: 'dlg-t', text: 'Switch to which account?' }),
+        h('p', { text: 'When a chat hits its limit, Switcher for Claude Code moves to another account and continues the chat there.' })),
+      list,
+      h('div', { class: 'actions' }, h('button', { class: 'btn ghost', onclick: closeEdit }, 'Cancel'), next)))
+    const on = list.querySelector('[aria-checked="true"]')
+    if (on) on.focus()
+  }
+
+  function orderDialog(extra) {
+    closeEdit()
+    const accounts = state.accounts || []
+    const ac = state.autoContinue
+    let order = (ac.order || []).filter((n) => accounts.some((a) => a.name === n))
+    if (!order.length) order = accounts.filter((a) => !a.needsLogin).map((a) => a.name)
+    let dragging = null
+    const list = h('div', { class: 'order-list' })
+    const move = (from, to) => { order.splice(to, 0, order.splice(from, 1)[0]); draw() }
+    const draw = () => {
+      const row = (a, i) => {
+        const on = i !== null
+        const why = [a.active ? 'in use now' : null, a.needsLogin ? 'needs signing in' : null, on ? null : 'never switched to'].filter(Boolean)
+        const r = h('div', { class: 'order-row' + (on ? '' : ' off'), draggable: on ? 'true' : null },
+          h('span', { class: 'grip', title: on ? 'Drag to reorder' : null }, on ? icon('grip', 'sm') : null),
+          h('span', { class: 'rank', text: on ? String(i + 1) : '' }),
+          avatar(a, 'avatar sm'),
+          h('div', { class: 'grow' }, h('span', { class: 'nm', text: a.label }), why.length ? h('span', { class: 'who', text: why.join(' · ') }) : null),
+          on ? h('button', { class: 'icon-btn', title: 'Earlier', 'aria-label': 'Move ' + a.label + ' earlier', disabled: i === 0 || null,
+            onclick: () => move(i, i - 1) }, icon('up', 'sm')) : null,
+          on ? h('button', { class: 'icon-btn', title: 'Later', 'aria-label': 'Move ' + a.label + ' later', disabled: i === order.length - 1 || null,
+            onclick: () => move(i, i + 1) }, icon('down', 'sm')) : null,
+          h('button', { class: 'switch', role: 'switch', 'aria-checked': String(on), 'aria-label': (on ? 'Leave out ' : 'Include ') + a.label,
+            onclick: () => { order = on ? order.filter((n) => n !== a.name) : order.concat([a.name]); draw() } }))
+        if (on) {
+          r.addEventListener('dragstart', (e) => { dragging = a.name; r.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move' })
+          r.addEventListener('dragend', () => { dragging = null; draw() })
+          r.addEventListener('dragover', (e) => {
+            if (!dragging || dragging === a.name) return
+            e.preventDefault()
+            move(order.indexOf(dragging), order.indexOf(a.name))
+          })
+        }
+        return r
+      }
+      list.replaceChildren(...order.map((n, i) => row(accounts.find((a) => a.name === n), i)),
+        ...accounts.filter((a) => !order.includes(a.name)).map((a) => row(a, null)))
+    }
+    draw()
+    showDialog(h('div', { class: 'dialog wide', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dlg-t' },
+      h('div', null, h('h3', { id: 'dlg-t', text: 'Switch order' }),
+        h('p', { text: 'It moves to the first account here that has room, so it comes back to an earlier one once that has reset. ' +
+          'Accounts switched off are never used. If none has room, it waits for the first one to reset.' })),
+      list,
+      h('div', { class: 'actions' }, h('button', { class: 'btn ghost', onclick: closeEdit }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: () => {
+          send('autoContinue', Object.assign({ pick: 'order', order: order.slice() }, extra || {}))
+          closeEdit()
+        } }, 'Save'))))
+  }
+
+  function autoContinueSection() {
+    const s = state
+    const ac = s.autoContinue
+    if (!ac || !s.features || !s.features.autoContinue) return null
+    const chip = (kind, text) => h('button', { class: 'chip', 'data-menu': kind + ':x', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      onclick: (e) => toggleMenu(kind, 'x', e.currentTarget, e) }, h('span', { text }), icon('down', 'sm'))
+    const sentence = h('div', { class: 'ac-row sentence' },
+      h('span', { text: 'When a chat' }), chip('ac-when', ac.early ? 'reaches ' + ac.early + '% of its limit' : 'hits its limit'),
+      h('span', { class: 'comma', text: ',' }),
+      chip('ac-mode', acLabel(ac.early ? AC_EARLY_MODES : AC_MODES, ac.mode)),
+      ac.mode === 'switch' ? h('span', { text: 'using' }) : null,
+      ac.mode === 'switch' ? chip('ac-pick', acLabel(AC_PICKS, ac.pick)) : null,
+      ac.mode === 'switch' && ac.pick === 'order' ? h('button', { class: 'linkbtn', onclick: () => orderDialog() }, 'Edit order') : null)
+    const waiting = ac.waiting && ac.waiting.length
+      ? h('div', { class: 'pin-list ac-wait' }, ac.waiting.map((w) => h('div', { class: 'pin-row' }, icon('clock', 'sm'),
+        h('div', { class: 'grow' }, h('span', { class: 'path ltr', text: w.title }),
+          h('span', { class: 'who', text: 'continues at ' + w.at + (w.on ? ' on ' + w.on : '') })),
+        h('button', { class: 'btn soft-danger sm', onclick: () => send('cancelContinue', { id: w.id }) }, 'Cancel'))))
+      : null
+    const how = h('details', { class: 'how' }, h('summary', null, icon('info', 'sm'), 'How it works'),
+      h('p', { text: 'Switcher for Claude Code sends the stopped chat one note asking it to continue, and the chat picks up by itself, ' +
+        'live in the panel. A switch needs no reload. Chats in a pinned folder always wait for their own account, and a weekly ' +
+        'limit is never waited out. If a chat answers the note instead of continuing, you can let it trust these notes from then on.' }))
+    return h('section', null, h('div', { class: 'section-head' }, h('h2', { text: 'Auto-continue After Limits' })), sentence, waiting, how)
+  }
+
   function pinsSection() {
     const s = state
     const accounts = s.accounts || []
@@ -426,6 +617,12 @@
     input.focus()
     input.select()
   }
+  function showDialog(box) {
+    closeMenu(false)
+    dialog = h('div', { class: 'overlay open', onclick: (e) => { if (e.target === dialog) closeEdit() } }, box)
+    document.body.append(dialog)
+  }
+
   function closeEdit() {
     if (!dialog) return
     const d = dialog
@@ -463,6 +660,7 @@
           : h('div', { class: 'empty' }, h('strong', { text: 'No saved accounts yet' }),
             'Add an account, or save the one you’re signed in to now.')),
       pinsSection(),
+      autoContinueSection(),
       h('footer', { class: 'foot' },
         SIDEBAR
           ? h('button', { class: 'linkbtn', onclick: () => send('openTab') }, 'Open as a Tab')
@@ -501,7 +699,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { if (dialog) closeEdit(); else closeMenu(true); return }
     if (!menu || !menu.el.contains(document.activeElement)) return
-    const items = [...menu.el.querySelectorAll('[role="menuitem"]')]
+    const items = [...menu.el.querySelectorAll('[role^="menuitem"]')]
     if (!items.length) return
     const i = items.indexOf(document.activeElement)
     const go = { ArrowDown: i + 1, ArrowUp: i === -1 ? items.length - 1 : i - 1, Home: 0, End: items.length - 1 }[e.key]

@@ -10,8 +10,6 @@ const envBridge = require('./lib/env')
 const usageLib = require('./lib/usage')
 const profilesLib = require('./lib/profiles')
 const liveLib = require('./lib/live')
-const remoteLib = require('./lib/remote')
-const artifactsLib = require('./lib/artifacts')
 const secretsLib = require('./lib/secrets')
 const shell = require('./lib/shell')
 const credstore = require('./lib/credstore')
@@ -20,7 +18,11 @@ const locksLib = require('./lib/locks')
 const windowsLib = require('./lib/windows')
 const editionLib = require('./lib/edition')
 const moveLib = require('./lib/movefile')
+const transferLib = require('./lib/transfer')
+const autoLib = require('./lib/autocontinue')
 const kickoffLib = require('./lib/kickoff')
+const switchLib = require('./lib/switch')
+const preferencesLib = require('./lib/preferences')
 const contextLib = require('./lib/context')
 const pageLib = require('./ui/page')
 
@@ -378,6 +380,336 @@ async function startSessionFor(nameArg) {
   }
 }
 
+let handoffRun = null
+let keepAliveRun = null
+let limitChecking = false
+const keepAliveBusy = new Set()
+const LIMIT_WORDS = { session: '5-hour limit', weekly: 'weekly limit', model: 'weekly model limit' }
+const ACTIVE_STOP = ['new', 'asked', 'waiting', 'switching', 'sending', 'sent', 'trust']
+
+function autoContinueOn() { return editionLib.hasFeature(edition, 'autoContinue') }
+
+function clockText(ms) {
+  const d = new Date(ms)
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + t
+}
+
+const sameProject = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
+
+function chatIsHere(chat) {
+  const f = firstFolder()
+  return !!f && contextLib.folderKeys(f).some((k) => sameProject(k, chat.project))
+}
+
+function chatPin(chat) {
+  for (const [folder, name] of Object.entries(store.getPins(root()))) {
+    if (contextLib.folderKeys(folder).some((k) => sameProject(k, chat.project))) return name
+  }
+  return null
+}
+
+function openChat(sessionId, prompt) {
+  vscode.commands.executeCommand('claude-vscode.primaryEditor.open', sessionId, prompt).then(() => {}, (e) => {
+    log('open chat: ' + (e && e.message))
+    vscode.window.showWarningMessage("Couldn't open the chat in Claude Code. Open it yourself and type \"continue\".")
+  })
+}
+
+async function checkLimits() {
+  if (!autoContinueOn() || limitChecking) return
+  limitChecking = true
+  try {
+    const settings = store.getAutoContinue(root())
+    const now = Date.now()
+    for (const [id, e] of Object.entries(autoLib.readState(root()).stops)) {
+      if (e.state === 'waiting' && e.resetAt && now >= e.resetAt + autoLib.AFTER_RESET_MS) {
+        if (e.to && e.to !== profilesLib.activeProfile(root())) await switchAndContinue({ ...e, id }, e.to)
+        else await deliverNotice(id, 'reset')
+      }
+      else if (e.state === 'sent' && now - (e.sentAt || 0) > 45000) followUp(id, e)
+      else if (e.state === 'trust' && autoLib.trusted(e.file, e.trustAt)) await deliverNotice(id, 'reset', { again: true })
+    }
+    if (settings.mode === 'off') return
+    for (const c of contextCache.chats) {
+      const stop = autoLib.limitStop(c.file)
+      if (!stop || now - (stop.at || now) > autoLib.MAX_WAIT_MS) continue
+      const known = autoLib.readState(root()).stops
+      if (known[stop.id]) continue
+      if (Object.values(known).some((e) => e.chat === c.id && ACTIVE_STOP.includes(e.state) &&
+        now - (e.at || 0) < autoLib.MAX_WAIT_MS)) continue
+      if (!chatIsHere(c) && now - (stop.at || now) < 30000) continue
+      const info = contextLib.sessionInfo(c.id)
+      if (!info || info.status !== 'idle' || !info.inbox || !info.name) continue
+      handleStop(c, stop, info, settings)
+    }
+  } catch (e) {
+    log('auto-continue: ' + (e && e.message))
+  } finally {
+    limitChecking = false
+  }
+}
+
+function handleStop(chat, stop, info, settings) {
+  const account = contextLib.accountOf(chat, { pins: store.getPins(root()), liveLog: store.getLiveLog(root()) })
+  const rows = snapshotRows()
+  const pinned = chatPin(chat)
+  const resetAt = autoLib.resetFor(stop, rows.find((r) => r.name === (pinned || account)))
+  const entry = { id: stop.id, chat: chat.id, file: chat.file, name: info.name, title: chat.title, account: pinned || account,
+    kind: stop.kind, resetAt, pinned: !!pinned, permissionMode: stop.permissionMode || null, state: 'new' }
+  if (!autoLib.claim(root(), entry)) return
+  log('auto-continue: "' + chat.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] + (entry.account ? ' on "' + entry.account + '"' : ''))
+  const canWait = !!resetAt && resetAt - Date.now() <= autoLib.MAX_WAIT_MS
+  const to = pinned ? null : autoLib.pickAccount(rows, { exclude: entry.account, kind: stop.kind, pick: settings.pick, order: settings.order })
+  if (settings.mode === 'ask') { askAbout(entry, to, canWait); return }
+  if (settings.mode === 'switch' && !pinned) {
+    if (to) { switchAndContinue(entry, to); return }
+    const next = autoLib.nextAvailable(rows, { exclude: entry.account, stoppedAt: resetAt, kind: stop.kind, pick: settings.pick, order: settings.order })
+    if (next && next.at - Date.now() <= autoLib.MAX_WAIT_MS) {
+      const other = next.name !== entry.account ? next.name : null
+      autoLib.mark(root(), entry.id, { resetAt: next.at, to: other })
+      waitForReset({ ...entry, resetAt: next.at, to: other }, 'No account has room now, so it')
+      return
+    }
+  }
+  if (canWait) { waitForReset(entry, 'It'); return }
+  autoLib.mark(root(), entry.id, { state: 'skipped' })
+  vscode.window.showInformationMessage('"' + entry.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] +
+    ', which resets too far ahead to wait for, and no other account has room.')
+}
+
+function askAbout(entry, to, canWait) {
+  autoLib.mark(root(), entry.id, { state: 'asked' })
+  const SWITCH = to ? 'Switch to ' + labelOf(to) + ' and Continue' : null
+  const WAIT = canWait ? 'Continue at ' + clockText(entry.resetAt) : null
+  const what = '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + (entry.account ? ' on ' + labelOf(entry.account) : '') +
+    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? ' Its folder is pinned, so it stays on that account.' : '')
+  vscode.window.showInformationMessage(what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
+    if (pick && pick === SWITCH) switchAndContinue(entry, to)
+    else if (pick && pick === WAIT) waitForReset(entry, 'It')
+    else {
+      autoLib.mark(root(), entry.id, { state: 'skipped' })
+      if (pick === 'Settings') openAccounts()
+    }
+  }, () => {})
+}
+
+function waitForReset(entry, subject) {
+  autoLib.mark(root(), entry.id, { state: 'waiting' })
+  postState()
+  vscode.window.showInformationMessage(subject + ' will continue "' + entry.title + '" at ' + clockText(entry.resetAt) +
+    (entry.to ? ' on ' + labelOf(entry.to) + ', the first account with room again.' : ', when the limit resets.'), 'Cancel').then((pick) => {
+    if (pick === 'Cancel') { autoLib.mark(root(), entry.id, { state: 'cancelled' }); postState() }
+  }, () => {})
+}
+
+async function switchAndContinue(entry, to) {
+  const mine = autoLib.updateState(root(), (s) => {
+    const cur = s.stops[entry.id]
+    if (!cur || !['new', 'asked', 'waiting'].includes(cur.state)) return false
+    s.stops[entry.id] = { ...cur, state: 'switching', to }
+    return true
+  })
+  if (!mine) return
+  try { await switchTo(to) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
+  if (profilesLib.activeProfile(root()) !== to) {
+    autoLib.mark(root(), entry.id, { state: 'failed' })
+    vscode.window.showWarningMessage("Couldn't switch to \"" + labelOf(to) + '", so "' + entry.title + "\" wasn't continued.")
+    return
+  }
+  await new Promise((r) => setTimeout(r, 2000))
+  await deliverNotice(entry.id, 'switched')
+}
+
+async function deliverNotice(id, how, opts) {
+  const o = opts || {}
+  const e = autoLib.readState(root()).stops[id]
+  if (!e) return
+  if (!o.again) {
+    const stop = autoLib.limitStop(e.file)
+    if (!stop) { autoLib.mark(root(), id, { state: 'moved' }); postState(); return }
+  }
+  const info = contextLib.sessionInfo(e.chat)
+  if (!info || !info.inbox || !info.name) {
+    autoLib.mark(root(), id, { state: 'closed' })
+    postState()
+    vscode.window.showInformationMessage('"' + e.title + '" was closed, so it couldn\'t be continued.', 'Open Chat')
+      .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
+    return
+  }
+  const from = e.state
+  if (!autoLib.updateState(root(), (s) => {
+    if (!s.stops[id] || s.stops[id].state !== from) return false
+    s.stops[id].state = 'sending'
+    return true
+  })) return
+  if (!autoLib.canReceive(e.permissionMode)) {
+    autoLib.mark(root(), id, { state: 'manual' })
+    postState()
+    vscode.window.showInformationMessage((how === 'switched' ? 'Switched to ' + labelOf(profilesLib.activeProfile(root())) + '. '
+      : 'The limit has reset. ') + '"' + e.title + '" skips permission prompts, so it only takes "continue" from you.', 'Open Chat')
+      .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
+    return
+  }
+  const res = await (handoffRun || autoLib.send)(info.name, autoLib.noticeFor({ kind: e.kind }, how))
+  if (res && res.ok) {
+    autoLib.mark(root(), id, { state: 'sent', sentAt: Date.now(), name: info.name })
+    log('auto-continue: sent "' + e.title + '" its notice (' + how + ')')
+  } else {
+    autoLib.mark(root(), id, { state: 'failed' })
+    log('auto-continue: sending failed: ' + (res && res.reason))
+    vscode.window.showWarningMessage("Couldn't continue \"" + e.title + '" automatically: ' + ((res && res.reason) || 'the notice wasn\'t sent') + '.',
+      'Continue Now').then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
+  }
+  postState()
+}
+
+function followUp(id, e) {
+  const outcome = autoLib.afterNotice(e.file)
+  const info = contextLib.sessionInfo(e.chat)
+  if (outcome === 'pending') {
+    if (info && info.status === 'busy') return
+    if (Date.now() - (e.sentAt || 0) < 5 * 60e3) return
+    autoLib.mark(root(), id, { state: 'failed' })
+    vscode.window.showWarningMessage('"' + e.title + '" didn\'t pick up the notice to continue.', 'Continue Now')
+      .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
+    return
+  }
+  if (outcome === 'replied' && info && info.status === 'busy') return
+  autoLib.mark(root(), id, { state: outcome })
+  if (outcome === 'continued') {
+    log('auto-continue: "' + e.title + '" continued')
+    vscode.window.showInformationMessage('Continued "' + e.title + '" after its usage limit.')
+  } else if (outcome === 'replied') {
+    vscode.window.showWarningMessage('"' + e.title + '" answered the notice instead of continuing. ' +
+      'Some chats wait for you to say so first: tell it once to accept Switcher\'s notices, and it continues by itself from then on.',
+    'Continue Now', 'Let It Trust Switcher').then((p) => {
+      if (p === 'Continue Now') openChat(e.chat, 'continue')
+      else if (p === 'Let It Trust Switcher') {
+        autoLib.mark(root(), id, { state: 'trust', trustAt: Date.now() })
+        openChat(e.chat, autoLib.TRUST_PROMPT)
+        vscode.window.showInformationMessage('Send the message typed into the chat. Switcher for Claude Code then sends its notice again.')
+      }
+    }, () => {})
+  }
+}
+
+async function keepAliveTick() {
+  if (!editionLib.hasFeature(edition, 'keepAlive')) return
+  const names = store.keepAliveNames(root())
+  if (!names.length) return
+  const rows = snapshotRows()
+  for (const name of names) {
+    const row = rows.find((r) => r.name === name)
+    if (!row || row.needsLogin || !row.session || keepAliveBusy.has(name) || startingSessions.has(name)) continue
+    if (sessionRunning(row.session) || (row.weekly && !row.weekly.resetSince && row.weekly.percent >= 100)) continue
+    const due = autoLib.updateState(root(), (s) => {
+      if (Date.now() - (s.keepAlive[name] || 0) < 10 * 60e3) return false
+      s.keepAlive[name] = Date.now()
+      return true
+    })
+    if (!due) continue
+    keepAliveBusy.add(name)
+    try {
+      const live = name === profilesLib.activeProfile(root())
+      const res = live
+        ? await kickoffLib.runLive(keepAliveRun || undefined)
+        : await kickoffLib.startSession(root(), name, { renew: trackerLib.renew, run: kickoffRun || undefined })
+      log('keep alive: ' + (res && res.ok ? 'started the next 5-hour session for "' + name + '"' : '"' + name + '" failed: ' + (res && res.reason)))
+      if (res && res.ok) {
+        if (live) await refreshLiveQuietly()
+        else { try { await trackerLib.poll(root(), name, { force: true }) } catch (e) { log('usage after keep alive: ' + (e && e.message)) } }
+      }
+    } catch (e) {
+      log('keep alive "' + name + '": ' + (e && e.message))
+    } finally {
+      keepAliveBusy.delete(name)
+      refreshAll()
+    }
+  }
+}
+
+const LIVE_EVERY_MS = 2 * 60 * 1000
+let liveUsageRun = null
+let livePolling = false
+async function pollLiveUsage() {
+  if (!trackingEnabled() || livePolling) return
+  livePolling = true
+  try {
+    const key = usageLib.accountKey(null)
+    const fresh = () => {
+      const ours = usageLib.readLiveCache(root(), null)
+      const claudes = usageLib.readUsage(null)
+      const newest = Math.max((ours && ours.fetchedAtMs) || 0, (claudes && claudes.fetchedAtMs) || 0)
+      return Date.now() - newest < LIVE_EVERY_MS - 5000
+    }
+    if (usageLib.pausedUntil(root(), key) > Date.now() || fresh()) return
+    const release = locksLib.tryAcquire(root(), 'live-usage', 30000)
+    if (!release) return
+    try {
+      if (fresh()) return
+      const res = await (liveUsageRun || liveLib.fetchUsage)(null)
+      if (res && res.ok) usageLib.writeLiveCache(root(), null, res.utilization)
+      else if (res && res.rateLimited) usageLib.pauseUntil(root(), key, Date.now() + (res.retryAfterMs || DEFAULT_USAGE_PAUSE_MS))
+      else log('live usage (every minute): ' + (res && res.reason))
+    } finally { release() }
+    updateUsageBar()
+    postState()
+  } catch (e) {
+    log('live usage (every minute) failed: ' + (e && e.message))
+  } finally {
+    livePolling = false
+  }
+}
+
+let earlyBusy = false
+function earlySwitchCheck() {
+  if (!autoContinueOn() || earlyBusy) return
+  const st = store.getAutoContinue(root())
+  if (!st.early || (st.mode !== 'switch' && st.mode !== 'ask')) return
+  const live = profilesLib.activeProfile(root())
+  if (!live) return
+  const rows = snapshotRows()
+  const row = rows.find((r) => r.name === live)
+  const why = autoLib.earlyTrigger(row, st.early)
+  if (!why) return
+  const lim = why === 'weekly' ? row.weekly : row.session
+  const to = autoLib.pickEarly(rows, { exclude: live, kind: why, pick: st.pick, order: st.order, early: st.early })
+  if (!to) return
+  const windowKey = live + '@' + ((lim && lim.resetsAt) || 'unknown')
+  const mine = autoLib.updateState(root(), (s) => {
+    const e = s.early || {}
+    const handled = Object.fromEntries(Object.entries(e.handled || {}).filter(([, at]) => Date.now() - at < 8 * 86400e3))
+    if (Date.now() - (e.lastAt || 0) < autoLib.EARLY_COOLDOWN_MS || handled[windowKey]) return false
+    s.early = { lastAt: Date.now(), handled: { ...handled, [windowKey]: Date.now() } }
+    return true
+  })
+  if (!mine) return
+  const what = labelOf(live) + ' reached ' + Math.round(lim.percent) + '% of its ' + (why === 'weekly' ? 'weekly limit' : '5-hour limit')
+  log('early switch: ' + what + '; next is "' + to + '"')
+  if (st.mode === 'ask') {
+    vscode.window.showInformationMessage(what + '. Switch to ' + labelOf(to) + ' now, so work doesn\'t stop?', 'Switch Now', 'Not Now')
+      .then((p) => { if (p === 'Switch Now') earlySwitch(live, to, what) }, () => {})
+    return
+  }
+  earlySwitch(live, to, what)
+}
+
+async function earlySwitch(from, to, what) {
+  earlyBusy = true
+  try {
+    try { await switchTo(to, { quiet: true }) } catch (e) { log('early switch: ' + (e && e.message)) }
+    if (profilesLib.activeProfile(root()) !== to) {
+      vscode.window.showWarningMessage("Couldn't switch to \"" + labelOf(to) + '" early. ' + what + '.')
+      return
+    }
+    vscode.window.showInformationMessage('Switched to ' + labelOf(to) + ': ' + what + '. Work carries on from the next message.',
+      'Switch Back').then((p) => { if (p === 'Switch Back') switchTo(from) }, () => {})
+  } finally {
+    earlyBusy = false
+  }
+}
+
 let updatingAll = false
 async function refreshAllAccounts() {
   if (trackerRunning || updatingAll) return
@@ -442,10 +774,10 @@ async function trackerTick(opts) {
   }
 }
 
-async function switchTo(name) {
+async function switchTo(name, opts) {
   if (typeof name !== 'string' || !profilesLib.exists(root(), name)) return
   await ensureGlobalMode()
-  await switchToProfile(name)
+  await switchToProfile(name, opts)
 }
 
 function loginArgs(email) {
@@ -690,14 +1022,18 @@ function liveLoginUnsaved() {
 
 async function addAccount() {
   await ensureGlobalMode()
-  if (liveLoginUnsaved()) {
-    const id = profilesLib.currentIdentity()
+  const unsaved = liveLoginUnsaved()
+  const canImport = editionLib.hasFeature(edition, 'transfer')
+  if (unsaved || canImport) {
+    const id = unsaved ? profilesLib.currentIdentity() : null
     const pick = await vscode.window.showQuickPick([
-      { label: '$(save) Save the account you are signed in to now', description: (id && id.email) || '', value: 'save' },
+      unsaved ? { label: '$(save) Save the account you are signed in to now', description: (id && id.email) || '', value: 'save' } : null,
       { label: '$(sign-in) Sign in to another account', description: 'opens the Claude login in your browser', value: 'new' },
-    ], { placeHolder: 'Add a Claude account' })
+      canImport ? { label: '$(cloud-download) Import from a move file', description: 'accounts moved here from another PC', value: 'import' } : null,
+    ].filter(Boolean), { placeHolder: 'Add a Claude account' })
     if (!pick) return
     if (pick.value === 'save') return saveCurrentLogin()
+    if (pick.value === 'import') return importFromFile()
   }
   return signInNewAccount()
 }
@@ -841,37 +1177,14 @@ function editAccount(name, label, icon, color) {
   return true
 }
 
-function applyRemotePreference(name) {
-  if (!name || !store.remoteManaged(root())) return null
-  const off = store.getRemote(root(), name) === 'off'
-  let res
-  try { res = remoteLib.setDisabled(off) } catch (e) { log('remote control: ' + (e && e.message)); return null }
-  if (res.changed) log('remote control ' + (off ? 'disabled' : 'enabled') + ' for "' + name + '"')
-  return res
-}
-
-function applyArtifactPreference(name) {
-  if (!name || !store.artifactsManaged(root())) return null
-  const off = store.getArtifacts(root(), name) === 'off'
-  let res
-  try { res = artifactsLib.setOff(off) } catch (e) { log('artifacts: ' + (e && e.message)); return null }
-  if (res.changed) log('artifacts ' + (off ? 'turned off' : 'back on') + ' for "' + name + '"')
-  return res
+function applyPreferences(name) {
+  return preferencesLib.applyPreferences(root(), name, { log })
 }
 
 function setArtifactsFor(name, on) {
   if (!profilesLib.exists(root(), name)) return
-  store.setArtifacts(root(), name, on ? 'on' : 'off')
-  let applied = false
-  if (profilesLib.activeProfile(root()) === name) {
-    try { applied = artifactsLib.setOff(!on).changed } catch (e) {
-      log('artifacts: ' + (e && e.message))
-      vscode.window.showWarningMessage('Artifacts: ' + (e && e.message))
-    }
-  }
-  try {
-    if (fs.existsSync(windowsLib.windowDir(root(), name)) && windowsLib.syncSettings(root(), name)) applied = true
-  } catch (e) { log('window settings sync: ' + (e && e.message)) }
+  const { applied, warning } = preferencesLib.setArtifactsFor(root(), name, on, { log })
+  if (warning) vscode.window.showWarningMessage('Artifacts: ' + warning)
   refreshAll()
   vscode.window.showInformationMessage('Artifacts are ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
     (on ? ' where Anthropic offers them' : '') +
@@ -880,17 +1193,8 @@ function setArtifactsFor(name, on) {
 
 function setRemoteFor(name, on) {
   if (!profilesLib.exists(root(), name)) return
-  store.setRemote(root(), name, on ? 'on' : 'off')
-  let applied = false
-  if (profilesLib.activeProfile(root()) === name) {
-    try { applied = remoteLib.setDisabled(!on).changed } catch (e) {
-      log('remote control: ' + (e && e.message))
-      vscode.window.showWarningMessage('Remote Control: ' + (e && e.message))
-    }
-  }
-  try {
-    if (fs.existsSync(windowsLib.windowDir(root(), name)) && windowsLib.syncSettings(root(), name)) applied = true
-  } catch (e) { log('window settings sync: ' + (e && e.message)) }
+  const { applied, warning } = preferencesLib.setRemoteFor(root(), name, on, { log })
+  if (warning) vscode.window.showWarningMessage('Remote Control: ' + warning)
   refreshAll()
   vscode.window.showInformationMessage('Remote Control is ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
     (applied ? '. Chats already running keep their current connection until restarted.' : '.'))
@@ -952,31 +1256,20 @@ async function globalSwitch() {
 }
 
 let switchQueue = Promise.resolve()
-function switchToProfile(name) {
-  const run = switchQueue.then(() => doSwitch(name))
+function switchToProfile(name, opts) {
+  const run = switchQueue.then(() => doSwitch(name, opts))
   switchQueue = run.catch(() => {})
   return run
 }
 
-async function lockAccounts(names) {
-  const held = []
-  const ok = await vscode.window.withProgress(
+function lockAccounts(names) {
+  return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Waiting for a background login renewal to finish...' },
-    async () => {
-      for (const n of [...new Set(names.filter(Boolean))].sort()) {
-        const release = await locksLib.acquire(root(), trackerLib.accountLock(n),
-          { waitMs: 45000, staleMs: trackerLib.LOCK_STALE_MS })
-        if (!release) return false
-        held.push(release)
-      }
-      return true
-    })
-  if (ok) return held
-  held.forEach((r) => r())
-  return null
+    () => switchLib.lockAccounts(root(), names))
 }
 
-async function doSwitch(name) {
+async function doSwitch(name, opts) {
+  const quiet = !!(opts && opts.quiet)
   const pick = { name }
   let active = profilesLib.activeProfile(root())
   if (active === pick.name) {
@@ -996,50 +1289,29 @@ async function doSwitch(name) {
     } else if (choice !== 'Switch Without Saving') return
   }
 
-  let held = null
-  for (let round = 0; round < 3; round++) {
-    held = await lockAccounts([pick.name, active])
-    if (!held) {
-      vscode.window.showErrorMessage('Switch cancelled: a background login renewal did not finish. Try again in a minute.')
-      return
-    }
-    const now = profilesLib.activeProfile(root())
-    if (now === active) break
-    held.forEach((r) => r())
-    held = null
-    active = now
-    if (active === pick.name) {
+  let applied
+  try {
+    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, withoutSaving: true })
+    if (!res.switched) {
       vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
       return
     }
-  }
-  if (!held) {
-    vscode.window.showErrorMessage('Switch cancelled: the live account kept changing in another window. Try again.')
-    return
-  }
-
-  let applied
-  try {
-    if (active && profilesLib.hasCurrentLogin()) {
-      try { profilesLib.capture(root(), active) } catch (e) {
-        log('pre-switch capture of "' + active + '" failed: ' + (e && e.message))
-        vscode.window.showErrorMessage('Switch cancelled: the login Claude Code is using now couldn\'t be saved to "' +
-          labelOf(active) + '" first. ' + (e && e.message) + ' Nothing was changed.')
-        return
-      }
-    }
-    usageLib.rememberClaudeCache(root(), null)
-    applied = profilesLib.apply(root(), pick.name)
+    applied = res
   } catch (e) {
-    const why = String((e && e.message) || 'something went wrong').replace(/\.?$/, '.')
-    vscode.window.showErrorMessage('Switch failed: ' + why + (e && e.code === 'ENOIDENTITY' ? '' : ' Your previous login is still in place.'))
+    const code = e && e.code
+    if (code === 'BUSY') vscode.window.showErrorMessage('Switch cancelled: a background login renewal did not finish. Try again in a minute.')
+    else if (code === 'MOVING') vscode.window.showErrorMessage('Switch cancelled: the live account kept changing in another window. Try again.')
+    else if (code === 'CAPTURE') {
+      const why = e.cause && e.cause.message
+      log('pre-switch capture of "' + e.account + '" failed: ' + why)
+      vscode.window.showErrorMessage('Switch cancelled: the login Claude Code is using now couldn\'t be saved to "' +
+        labelOf(e.account) + '" first. ' + why + ' Nothing was changed.')
+    } else {
+      const why = String((e && e.message) || 'something went wrong').replace(/\.?$/, '.')
+      vscode.window.showErrorMessage('Switch failed: ' + why + (code === 'ENOIDENTITY' ? '' : ' Your previous login is still in place.'))
+    }
     return
-  } finally {
-    held.forEach((r) => r())
   }
-
-  applyRemotePreference(pick.name)
-  applyArtifactPreference(pick.name)
 
   const st = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Switching to ' + labelOf(pick.name) + '...' },
@@ -1059,11 +1331,9 @@ async function doSwitch(name) {
       labelOf(pinState.name) + ' because its folder is pinned.')
     return
   }
-  const choice = await vscode.window.showInformationMessage(
-    'Now signed in as ' + who + '. Your chats and history are untouched. ' +
-    'Open chats keep the previous account until reopened.',
-    'Reload Window', 'Not Now')
-  if (choice === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow')
+  if (quiet) return
+  vscode.window.showInformationMessage('Now signed in as ' + who + '. Your chats and history are untouched, ' +
+    'and open chats use it from their next message.')
 }
 
 function accountItems(current) {
@@ -1223,16 +1493,16 @@ function cleanupSpares() {
   return removed
 }
 
-async function askPassphrase() {
+async function askPassphrase(title) {
   const first = await vscode.window.showInputBox({
-    title: 'Passphrase for the login file',
+    title: title || 'Passphrase for the login file',
     prompt: 'You will type this again on the other PC to import it. At least ' + moveLib.MIN_PASSPHRASE + ' characters.',
     password: true, ignoreFocusOut: true,
     validateInput: (v) => (v && v.length >= moveLib.MIN_PASSPHRASE ? null : 'Use at least ' + moveLib.MIN_PASSPHRASE + ' characters.'),
   })
   if (!first) return null
   const again = await vscode.window.showInputBox({
-    title: 'Passphrase for the login file',
+    title: title || 'Passphrase for the login file',
     prompt: 'Type it once more.', password: true, ignoreFocusOut: true,
   })
   if (again === undefined) return null
@@ -1330,13 +1600,126 @@ async function makeSpareLogin(nameArg) {
     }
     log('made a login for another PC for "' + name + '"')
     vscode.window.showInformationMessage('Saved a separate login for "' + label + '" to ' + file + '. ' +
-      'On the other PC, import it with move-accounts.js and the same passphrase, then delete the file. ' +
-      'It lasts about four weeks from today.')
+      importHint() + ' It lasts about four weeks from today.')
     return true
   } finally {
     if (term) { try { term.dispose() } catch {  } }
     destroySpare(dir)
   }
+}
+
+function importHint() {
+  return editionLib.hasFeature(edition, 'transfer')
+    ? 'On the other PC, open Claude Accounts → Add account → Import from a move file, type the same passphrase, then delete the file.'
+    : 'On the other PC, import it with move-accounts.js and the same passphrase, then delete the file.'
+}
+
+function downloadsDir() {
+  const d = path.join(os.homedir(), 'Downloads')
+  return fs.existsSync(d) ? d : os.homedir()
+}
+
+function revealFile(file) {
+  vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(file)).then(() => {}, () => {})
+}
+
+async function moveToAnotherPC(nameArg) {
+  const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg) ? nameArg : null
+  if (!name) return false
+  const label = labelOf(name)
+  if (profilesLib.activeProfile(root()) === name) {
+    await vscode.window.showWarningMessage('"' + label + '" is the account Claude Code is using now, so it can\'t leave this PC yet.',
+      { modal: true, detail: 'Switch to another account first, then move it.' })
+    return false
+  }
+  const go = await vscode.window.showWarningMessage('Move "' + label + '" to another PC?', {
+    modal: true,
+    detail: 'It will be removed from this PC as soon as the file is saved. To use it here again later, sign in again, ' +
+      'or move it back from the other PC.\n\nTo keep it here as well, use "Make a login for another PC…" instead.',
+  }, 'Move it')
+  if (go !== 'Move it') return false
+
+  const passphrase = await askPassphrase('Passphrase for the move file')
+  if (!passphrase) return false
+  const target = await vscode.window.showSaveDialog({
+    title: 'Save "' + label + '" for the other PC',
+    saveLabel: 'Save and remove from this PC',
+    defaultUri: vscode.Uri.file(path.join(downloadsDir(), name + '.move')),
+    filters: { 'Account move file': ['move'] },
+  })
+  if (!target) return false
+
+  const res = await transferLib.exportAccounts(root(), [name], passphrase, target.fsPath, { overwrite: true })
+  try { store.setArtifacts(root(), name, 'on') } catch (e) { log('artifacts pref: ' + e.message) }
+  log('moved "' + name + '" out of this PC')
+  refreshAll()
+  vscode.window.showInformationMessage('Moved "' + label + '" out of this PC, into ' + res.file + '. ' + importHint(), 'Show file')
+    .then((pick) => { if (pick === 'Show file') revealFile(res.file) }, () => {})
+  return true
+}
+
+async function importFromFile() {
+  const sel = await vscode.window.showOpenDialog({
+    title: 'Import accounts from a move file',
+    openLabel: 'Import',
+    canSelectMany: false,
+    defaultUri: vscode.Uri.file(downloadsDir()),
+    filters: { 'Account move file': ['move'] },
+  })
+  if (!sel || !sel[0]) return false
+  const file = sel[0].fsPath
+  if (transferLib.wasImported(file)) {
+    vscode.window.showWarningMessage(path.basename(file) + ' was imported once already. A login can only be used on one PC; ' +
+      'ask for a new file instead.')
+    return false
+  }
+
+  let read = null
+  for (;;) {
+    const passphrase = await vscode.window.showInputBox({
+      title: 'Passphrase for ' + path.basename(file),
+      prompt: 'The passphrase chosen when the file was made.',
+      password: true, ignoreFocusOut: true,
+    })
+    if (!passphrase) return false
+    try {
+      read = transferLib.readFile(file, passphrase)
+      break
+    } catch (e) {
+      if (e.code !== 'EPASSPHRASE') throw e
+      if ((await vscode.window.showWarningMessage(e.message, 'Try again')) !== 'Try again') return false
+    }
+  }
+
+  const replace = new Set()
+  for (const a of read.accounts) {
+    if (transferLib.planFor(root(), a, read.exportedAt).action !== 'replace') continue
+    const ok = await vscode.window.showWarningMessage('"' + a.name + '" is already saved here. Replace its login with the one in the file?',
+      { modal: true, detail: 'Do this when the one here has expired. The login saved here is kept in backups.' }, 'Replace')
+    if (ok === 'Replace') replace.add(a.name)
+  }
+
+  const res = await transferLib.importAccounts(root(), read, { replace })
+  const got = res.added.concat(res.replaced)
+  const skipped = res.skipped.map((s) => s.name + ' (' + s.reason + ')').join(', ')
+  if (!got.length) {
+    vscode.window.showWarningMessage('Nothing was imported from ' + path.basename(file) + (skipped ? ': ' + skipped + '.' : '.'))
+    return false
+  }
+  const used = transferLib.markImported(file) || file
+  log('imported ' + got.join(', ') + ' from a move file')
+  refreshAll()
+  vscode.window.showInformationMessage(
+    (res.added.length ? 'Added ' + res.added.map(labelOf).join(', ') + '. ' : '') +
+    (res.replaced.length ? 'Replaced the login for ' + res.replaced.map(labelOf).join(', ') + '. ' : '') +
+    (skipped ? 'Skipped ' + skipped + '. ' : '') +
+    'Delete ' + used + ' now: it holds these logins until you do.',
+    'Delete file', 'Show file')
+    .then((pick) => {
+      if (pick === 'Delete file') { try { fs.rmSync(used, { force: true }) } catch (e) { log('delete move file: ' + e.message) } }
+      else if (pick === 'Show file') revealFile(used)
+    }, () => {})
+  return true
 }
 
 function windowLoginNames() {
@@ -1599,6 +1982,9 @@ function pageState() {
       spareLogin: editionLib.hasFeature(edition, 'spareLogin'),
       startSession: editionLib.hasFeature(edition, 'startSession'),
       context: editionLib.hasFeature(edition, 'context'),
+      transfer: editionLib.hasFeature(edition, 'transfer'),
+      autoContinue: editionLib.hasFeature(edition, 'autoContinue'),
+      keepAlive: editionLib.hasFeature(edition, 'keepAlive'),
     },
     live: { email: (id && id.email) || null, saved: !!active, label: active ? labelOf(active) : null },
     window: {
@@ -1624,6 +2010,7 @@ function pageState() {
         remoteOff: store.getRemote(root(), p.name) === 'off',
         artifactsOff: store.getArtifacts(root(), p.name) === 'off',
         starting: startingSessions.has(p.name),
+        keepAlive: store.getKeepAlive(root(), p.name),
         context: contextOf[p.name] || null,
         session: r.session || null,
         weekly: r.weekly || null,
@@ -1635,7 +2022,15 @@ function pageState() {
     pins: Object.entries(pins).map(([folder, name]) => ({
       folder, name, label: labelOf(name), here: !!(here && store.pinKey(here) === folder),
     })),
+    autoContinue: autoContinueOn() ? autoContinueState() : null,
   }
+}
+
+function autoContinueState() {
+  const waiting = Object.entries(autoLib.readState(root()).stops)
+    .filter(([, e]) => e.state === 'waiting' && e.resetAt)
+    .map(([id, e]) => ({ id, title: String(e.title || 'A chat').slice(0, 60), at: clockText(e.resetAt), on: e.to ? labelOf(e.to) : null }))
+  return { ...store.getAutoContinue(root()), waiting }
 }
 
 function postState() {
@@ -1666,7 +2061,26 @@ const PAGE_ACTIONS = {
   windowLogin: (m) => windowLogin(m.name),
   forgetWindowLogin: (m) => forgetWindowLogin(m.name),
   spareLogin: (m) => (editionLib.hasFeature(edition, 'spareLogin') ? makeSpareLogin(m.name) : null),
+  moveOut: (m) => (editionLib.hasFeature(edition, 'transfer') ? moveToAnotherPC(m.name) : null),
+  import: () => (editionLib.hasFeature(edition, 'transfer') ? importFromFile() : null),
   startSession: (m) => startSessionFor(m.name),
+  keepAlive: (m) => {
+    if (editionLib.hasFeature(edition, 'keepAlive') && profilesLib.exists(root(), m.name)) store.setKeepAlive(root(), m.name, m.on === true)
+  },
+  autoContinue: (m) => {
+    if (!autoContinueOn()) return
+    const patch = {}
+    if (autoLib.MODES.includes(m.mode)) patch.mode = m.mode
+    if (autoLib.PICKS.includes(m.pick)) patch.pick = m.pick
+    if (Array.isArray(m.order)) patch.order = m.order.filter((n) => store.validName(n) && profilesLib.exists(root(), n))
+    if (m.early === null) patch.early = null
+    else if (Number.isInteger(m.early) && m.early >= autoLib.EARLY_MIN && m.early <= autoLib.EARLY_MAX) patch.early = m.early
+    store.setAutoContinue(root(), patch)
+  },
+  cancelContinue: (m) => {
+    if (typeof m.id !== 'string' || m.id.length > 200) return
+    autoLib.updateState(root(), (s) => { if (s.stops[m.id] && s.stops[m.id].state === 'waiting') s.stops[m.id].state = 'cancelled' })
+  },
   pin: () => pinFolder(),
   unpin: (m) => unpinFolder(m.folder),
   status: () => showStatus(),
@@ -1736,7 +2150,32 @@ const viewProvider = {
   },
 }
 
+const OLD_IDS = ['local.claude-account-switcher']
+
+function oldCopyInstalled(context) {
+  const own = context && context.extension && context.extension.id
+  try {
+    return OLD_IDS.find((id) => id !== own && vscode.extensions && vscode.extensions.getExtension(id)) || null
+  } catch { return null }
+}
+
+function deferToOldCopy(old) {
+  vscode.window.showWarningMessage('Switcher for Claude Code is installed twice: an older copy (' + old + ') is still there, ' +
+    'and runs instead of this one. Uninstall it and reload to finish the update. Your saved accounts stay as they are.',
+  'Uninstall Old Copy')
+    .then(async (pick) => {
+      if (pick !== 'Uninstall Old Copy') return
+      await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', old)
+      const next = await vscode.window.showInformationMessage('Uninstalled the old copy. Reload to start the new one.', 'Reload Window')
+      if (next === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow')
+    })
+    .then(() => {}, () => {})
+}
+
 function activate(context) {
+  const old = oldCopyInstalled(context)
+  if (old) { deferToOldCopy(old); return }
+
   edition = editionLib.from(context)
   version = (context.extension && context.extension.packageJSON && context.extension.packageJSON.version) || null
   extensionPath = (context.extensionPath) || __dirname
@@ -1809,8 +2248,7 @@ function activate(context) {
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(VIEW_ID, viewProvider))
   }
 
-  try { applyRemotePreference(profilesLib.activeProfile(root())) } catch (e) { log('remote pref: ' + e.message) }
-  try { applyArtifactPreference(profilesLib.activeProfile(root())) } catch (e) { log('artifacts pref: ' + e.message) }
+  try { applyPreferences(profilesLib.activeProfile(root())) } catch (e) { log('remote and artifacts prefs: ' + e.message) }
 
   try { cleanupSpares() } catch (e) { log('spare cleanup: ' + (e && e.message)) }
   try { kickoffLib.cleanup(root()) } catch (e) { log('session cleanup: ' + (e && e.message)) }
@@ -1833,8 +2271,15 @@ function activate(context) {
   usageTimer = setInterval(() => updateUsageBar(), 60000)
   const contextTimer = setInterval(refreshContext, 30000)
   const compactTimer = contextBar ? setInterval(checkCompacting, 1000) : null
+  const limitTimer = setInterval(() => { checkLimits(); keepAliveTick() }, 15000)
+  const liveTick = () => { pollLiveUsage().then(earlySwitchCheck, earlySwitchCheck) }
+  const liveTimer = setInterval(liveTick, LIVE_EVERY_MS)
+  const liveFirst = setTimeout(liveTick, 8000)
   context.subscriptions.push({ dispose: () => {
     clearInterval(contextTimer)
+    clearInterval(limitTimer)
+    clearInterval(liveTimer)
+    clearTimeout(liveFirst)
     if (compactTimer) clearInterval(compactTimer)
     if (compactAnim) { clearInterval(compactAnim); compactAnim = null }
   } })
@@ -1875,6 +2320,11 @@ module.exports = {
     offerPrivateFiles,
     removeStaleTemps,
     setKickoffRun: (fn) => { kickoffRun = fn },
+    setHandoffRun: (fn) => { handoffRun = fn },
+    setKeepAliveRun: (fn) => { keepAliveRun = fn },
+    checkLimits, keepAliveTick, refreshContext,
+    setLiveUsageRun: (fn) => { liveUsageRun = fn },
+    pollLiveUsage, earlySwitchCheck,
     settle: () => Promise.all([...pendingLogins]),
     setLoginPollMs: (ms) => { loginPollMs = ms },
     trackerTick,

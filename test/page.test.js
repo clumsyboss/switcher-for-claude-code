@@ -121,7 +121,7 @@ check('and may shrink to 250px only to keep two abreast (under 608px: two 300px 
 check('text eases from 12.5px to 11.5px as a card goes from 300px to 250px',
   /\.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 220px\) \/ 50\), var\(--fs-max\)\); \}/.test(css))
 check('a narrow card shortens Remote Control and shows the Switch icon alone, keeping their full names',
-  /@container card \(max-width: 310px\)[^}]*\.has-short \.long \{ display: none; \}[\s\S]*?\.btn-text \{ display: none; \}/.test(css) &&
+  /@container card \(max-width: 340px\)[^}]*\.has-short \.long \{ display: none; \}[\s\S]*?\.btn-text \{ display: none; \}/.test(css) &&
   /toggle\('Remote Control', 'Remote'/.test(js) && /'aria-label': \(switching \? 'Switching to ' : 'Switch to '\) \+ a\.label/.test(js))
 check('a label without a short form is never hidden', !/\.toggle \.tl \.long \{ display: none/.test(css))
 

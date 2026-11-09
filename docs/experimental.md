@@ -11,10 +11,11 @@ its commands are not in the Command Palette, and nothing can call them by id.
 
 ## In testing right now
 
-Nothing at the moment. The last three features in testing moved into the
-release in 1.2.0: **a login for another PC**, **▶ start a 5-hour session** and
-**chat context**. The README describes them. The per-account Artifacts switch
-moved in 1.1.0.
+Nothing at the moment. **Moving accounts between PCs** (Move to another PC…,
+and Add account → Import from a move file), **auto-continue** (Auto-continue After
+Limits) and **keep alive** went straight into the release in 1.3.0. **A login for another PC**, **▶ start a 5-hour session** and **chat
+context** moved in 1.2.0, and the per-account Artifacts switch in 1.1.0. The
+README describes them all.
 
 ## Build and install
 

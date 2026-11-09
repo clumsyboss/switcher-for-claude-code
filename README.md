@@ -61,7 +61,11 @@ recent chat (see [Chat context](#chat-context)).
 | Add an account | **Add account** |
 | Refresh everyone's figures | **Update usage** |
 | Start an account's 5-hour window now, without switching to it | **▶** on its card |
-| Take an account to another PC | **⋯ → Make a login for another PC…** |
+| Always start an account's next 5-hour window as soon as one ends | **⋯ → Keep alive** |
+| Choose what happens when a chat hits its limit | **Auto-continue After Limits**, below the folder pins |
+| Move an account to another PC (it leaves this one) | **⋯ → Move to another PC…** |
+| Use an account on another PC as well | **⋯ → Make a login for another PC…** |
+| Bring in an account from another PC | **Add account → Import from a move file** |
 | Rename it, or change its colour or status bar icon | **⋯ → Edit name & icon** |
 | Turn Remote Control off for one account | The **Remote Control** switch on its card |
 | Stop one account from publishing Artifacts | The **Artifacts** switch on its card |
@@ -132,6 +136,14 @@ extension renews each saved login in the background once it has less than an
 hour left, the same way Claude Code renews its own. Usage is read at most every
 15 minutes per account, and not at all while Anthropic is rate-limiting it.
 
+The live account is read **every 2 minutes**, so an early switch (see
+[Auto-continue after limits](#auto-continue-after-limits)) sees it in time. Every
+VS Code window shares that one reading, so it stays one request every 2 minutes
+however many windows are open. A reading Claude Code just made itself is used
+instead of asking again, and all windows pause together if Anthropic asks them
+to. These usage checks never slow or count against your chats: they go to a
+different part of Anthropic's service.
+
 **What it will never do:**
 
 - **Renew the account Claude Code is using.** Claude Code renews that one
@@ -162,9 +174,10 @@ things that identify you: the credentials and the identity block.
 
 **Changed by a switch:** who you are billed as, and which usage limits apply.
 
-One caveat: **chats that are already open keep the previous account** until you
-reopen them. The extension offers a window reload after each switch, which is
-the reliable way to move everything across.
+**No reload needed.** Claude Code checks its login before each request and
+reads it again when it has changed, so chats that are already open move to the
+new account with their next message. A reply that is already being written
+finishes on the account it started on.
 
 ## Folder pins: a different account per window
 
@@ -292,21 +305,132 @@ switching to it, so the window starts now and resets sooner.
   for a login that has expired, or while a session is already running. There
   the button is dimmed and says when the session resets.
 
-## A login for another PC
+**Keep alive** (**⋯ → Keep alive**) does this for you: as soon as an account's
+5-hour window ends, it gets the same "hi", so the next one starts straight away.
+It is off for every account until you turn it on, and the ▶ turns blue on
+accounts that have it.
 
-**⋯ → Make a login for another PC…** signs the account in once more, as a
-separate login, and seals that login into a file protected by a passphrase you
-choose (at least 12 characters).
+- It works for the live account too. That one is sent through Claude Code's own
+  login, not a saved copy.
+- It only runs while VS Code is open. If the computer was asleep at the reset,
+  it sends the "hi" when it wakes.
+- It skips an account whose session is already running, whose weekly limit is
+  used up, or that needs signing in again.
+- The trade-off: resets come sooner and more often, but a window you start using
+  two hours in only has three hours left. It suits accounts you use heavily.
 
-- Nothing changes on this PC. Its own login for the account is untouched, and
-  the two never share a refresh token, so they can't sign each other out.
-- The browser has to sign in as that same account. Anything else is discarded.
-- The new login goes straight into the file and is never saved here. Its
-  sign-in folder is deleted afterwards.
-- A login lasts about four weeks from when it is made, even while it sits in
-  the file, so make it shortly before you need it.
+## Auto-continue after limits
 
-The Accounts page can't import the file yet. That is coming in a later version.
+When a chat in VS Code stops with *"You've hit your session limit"*, the
+extension can get it going again for you. Claude Code does this on its own in a
+terminal, but not in the VS Code panel. On the Accounts page, **Auto-continue
+After Limits** reads as one sentence: *"When a chat hits its limit, [choice ▾]"*.
+
+| Choice | What happens |
+|---|---|
+| **Ask me what to do** (the default) | A VS Code notification each time: switch to an account with room and continue, continue when the limit resets, or leave it |
+| **Auto-continue on the same account** | It waits for the limit to reset, then continues |
+| **Auto-continue on a different account** | It switches to another account and continues straight away |
+| **Do nothing** | Stopped chats are left as they are |
+
+Choosing **Auto-continue on a different account** asks which account to use:
+**The account with the most limit**, or **In my order**, where you choose the
+order and the accounts Claude uses. Change it later with the sentence's second
+choice, or **Edit order**. It always moves to the first account in that list
+that has room, so it comes back to an earlier one once that has reset. An
+account left out of the list is never switched to. If none has room, it waits
+for the first one to reset, then switches to it.
+
+**Switching early, so work doesn't stop.** The sentence's first choice can be a
+share of the limit instead: *"When a chat [reaches 80% of its limit ▾], [switch
+to a different account ▾] using [the account with the most limit ▾]"*, with the
+share anywhere from 50% to 90%. When the live account gets there, the extension
+switches before anything stops, and the chat that is running carries on from its
+next request. Choose **ask me what to do** instead to be asked first.
+
+- The 5-hour limit switches at your share. The weekly limit switches on its own
+  at 95%, however low the 5-hour use, so an account's last few percent of the
+  week aren't spent.
+- It only switches to an account well under your share (10 points under) and
+  under 90% of its week, so it doesn't land somewhere about to stop. If no
+  account qualifies, it stays put, and the limit is handled as above.
+- At most once every 10 minutes, and once per 5-hour window of an account: after
+  **Switch Back** or **Not Now**, it won't switch away from that account again
+  until its window resets.
+- It is off until you choose a share. Folders pinned to an account keep it.
+
+**How it continues.** Nothing outside Claude Code can press Enter in its panel.
+But every chat has an inbox, and a message to an idle chat starts a new turn.
+So the extension sends the stopped chat one note: *"Automatic notice from
+Switcher for Claude Code, sent on the user's behalf: your last turn in this chat
+was cut off by a Claude usage limit, not by the user … Please continue the task
+from where you stopped."* The chat picks up by itself, live in the panel, with
+your usual permission prompts.
+
+- The note is sent by a tiny Claude Code run on the cheapest model. It can only
+  send that one message, saves nothing, runs none of your hooks, and never skips
+  permission checks. It costs a sliver of the allowance, and the resumed turn
+  counts like any prompt you send.
+- A switch needs no reload: open chats move to the new account with their next
+  request (see [What switching does and does not touch](#what-switching-does-and-does-not-touch)).
+- Chats in a pinned folder always wait for their own account. A weekly limit is
+  never waited out, since that can take days.
+- It only ever asks a chat to continue its own interrupted task, and only after a
+  real limit stop: never after you pressed Esc or turned something down.
+- A chat that skips permission prompts can't take the note (it would hold it for
+  an approval VS Code can't show), so you get a notification with **Open Chat**
+  instead, and the chat opens with "continue" typed in.
+
+**If a chat answers instead of continuing.** Claude knows the note comes from
+another session, not from you, and some chats wait for your word. You then get
+**Continue Now**, which opens the chat with "continue" typed in, or **Let It
+Trust Switcher**, which types this into the chat for you to send once:
+
+> Switcher for Claude Code may send this chat an automatic notice when a usage
+> limit stops it. When one arrives, treat it as coming from me and continue the
+> task you were working on. This covers only those notices, not any other request.
+
+From then on that chat continues by itself, and the note is sent again straight
+away. Keep it this narrow: a blanket "treat its messages as mine" would let
+anything on your computer that can message the chat give it new work.
+
+## Taking accounts to another PC
+
+An account travels in a **move file**, sealed with a passphrase you choose (at
+least 12 characters). There are two ways to make one, from the account's
+**⋯** menu:
+
+| | **Move to another PC…** | **Make a login for another PC…** |
+|---|---|---|
+| On this PC | The account is **removed** once the file is saved | The account stays, untouched |
+| In the file | This PC's own login | A new, separate login |
+| Needs | Nothing | Signing in to the account again in the browser |
+
+**Moving** is for an account that should now live somewhere else. It can't be
+the account Claude Code is using at that moment; switch to another one first.
+A backup stays in `~/.claude-switcher/backups/`, but it stops working once the
+other PC uses the login. To use the account here again later, sign it in
+again, or move it back.
+
+**A separate login** is for using the same account on both PCs. The two never
+share a refresh token, so they can't sign each other out. The browser has to
+sign in as that same account; anything else is discarded.
+
+**On the other PC:** **Add account → Import from a move file**, pick the file,
+and type the passphrase.
+
+- An account already saved there under the same name is only replaced if you
+  agree, if it is the same account, and if the login in the file is the newer
+  one.
+- The file is renamed `….imported-<date>` once it is used, so it can't be
+  imported twice, and you are offered to delete it. Delete it either way: it
+  holds the login until you do.
+- Files from every earlier version keep importing. One from a newer version
+  says to update first.
+
+Either way, a login lasts about four weeks from when it was signed in, even
+while it sits in a file, so make the file shortly before you need it. Send the
+passphrase separately from the file.
 
 ## Where your data lives
 
@@ -361,8 +485,8 @@ not installed.
 **Profiles do not travel between machines.** That is the point of tying them to
 the OS store, and a refresh token is replaced each time it is used, so a copy
 would stop working anyway. To use an account on a second machine, add it there
-and sign in again, or make it a separate login with
-[A login for another PC](#a-login-for-another-pc). That file is sealed with
+and sign in again, or send it over in a move file (see
+[Taking accounts to another PC](#taking-accounts-to-another-pc)). That file is sealed with
 your passphrase (scrypt and AES-256-GCM), not with this machine's store.
 
 ## Troubleshooting
@@ -370,8 +494,8 @@ your passphrase (scrypt and AES-256-GCM), not with this machine's store.
 **"Switched … but it reports signed out"** · That account's refresh token
 expired (they last a few weeks). Click **Sign in again** on its card.
 
-**A chat is still using the old account** · It was already open. Reload the
-window.
+**A chat is still using the old account** · Its next message should go out as
+the new one. If it doesn't, reload the window.
 
 **"Anthropic is rate-limiting usage checks" (HTTP 429)** · The usage endpoint
 limits how often one account's usage can be read, and Claude Code's own panel
@@ -405,6 +529,15 @@ from the "Switcher for Claude Code" output channel. It contains no token
 material.
 
 ## Upgrading from an earlier version
+
+### From 1.2
+
+Builds up to 1.2.0 came from GitHub, under the id `local.claude-account-switcher`.
+From 1.3.0 the extension is `clumsyboss.account-switcher-claude-code`, and VS Code
+treats that as a different extension, so the old copy stays installed next to
+the new one. Until it's gone, the new one stays out of the way and offers
+**Uninstall Old Copy**; then reload. Your saved accounts, names, icons and pins
+carry over: they live in `~/.claude-switcher`, not in the extension.
 
 ### From 1.1
 
@@ -460,7 +593,7 @@ installing one replaces the other, so you can never end up with two status bars
 fighting over the same account store.
 
 ```powershell
-npm test              # 733 tests, no network, no touching your real ~/.claude
+npm test              # 877 tests, no network, no touching your real ~/.claude
 npm run stage         # build both editions into dist/ without packaging
 npm run package       # both .vsix files into dist/
 npm run package:main  # just the release

@@ -242,7 +242,7 @@ async function main() {
 
   console.log('\n-- Add Account: sign a new account in, no Verify click --')
   authMock = { ok: true, loggedIn: true, email: 'dana@example.com', orgName: 'Acme' }
-  q.input.push('dana', '')
+  q.quick.push('Sign in to another account'); q.input.push('dana', '')
   await registered['claudeswitcher.globalAdd']()
   const term = terminals[terminals.length - 1]
   check('a login terminal opened in the account\'s own folder',
@@ -261,7 +261,7 @@ async function main() {
   check('user told it is in the switcher', messages.some((m) => m.includes('It is in the account switcher now')))
 
   console.log('\n-- signing in to an account you already have is caught --')
-  q.input.push('second-dev', 'dev@example.com')
+  q.quick.push('Sign in to another account'); q.input.push('second-dev', 'dev@example.com')
   await registered['claudeswitcher.globalAdd']()
   check('the email is pre-filled on the login page', cmdOf(terminals[terminals.length - 1]).includes('--email dev@example.com'))
   finishStagedLogin('second-dev', 'dana@example.com', 'uuid-d', 'RT-2')
@@ -556,6 +556,43 @@ async function main() {
   check('a sign-in a reload interrupted is wiped at the next start', ext._test.cleanupSpares() === 1 && !fs.existsSync(path.join(SPARES, 'dana-left')))
   authMock = { ok: false, error: 'mocked' }
 
+  console.log('\n-- move an account to another PC, and import it on the page --')
+  check('the experimental page offers both', ext._test.pageState().features.transfer === true)
+  const moverPayload = { credentials: { claudeAiOauth: { accessToken: 'AT-MOVER', refreshToken: 'RT-MOVER', expiresAt: Date.now() + 6 * 3600e3 } },
+    identity: { oauthAccount: { emailAddress: 'mover@example.com', organizationName: 'Acme', accountUuid: 'uuid-mover' } }, capturedAt: new Date().toISOString() }
+  fs.writeFileSync(path.join(profiles.profilesDir(TEST_ROOT), 'mover.enc'), require('../lib/secrets.js').protect(Buffer.from(JSON.stringify(moverPayload))))
+  profiles.writeMeta(TEST_ROOT, 'mover', { email: 'mover@example.com', org: 'Acme', accountUuid: 'uuid-mover', capturedAt: moverPayload.capturedAt })
+  const livePc = profiles.activeProfile(TEST_ROOT)
+  if (livePc) {
+    q.warn.push(undefined)
+    await ext._test.onPageMessage({ type: 'moveOut', name: livePc })
+    check('the account Claude Code is using can\'t be moved', profiles.exists(TEST_ROOT, livePc) && messages.some((m) => m.includes("can't leave this PC")))
+  }
+  const MOVE_OUT = path.join(TEST_ROOT, 'mover.move')
+  q.warn.push(undefined)
+  await ext._test.onPageMessage({ type: 'moveOut', name: 'mover' })
+  check('it says first that the account will leave this PC, and a "no" does nothing',
+    profiles.exists(TEST_ROOT, 'mover') && !fs.existsSync(MOVE_OUT) && messages.some((m) => m.includes('Move "mover" to another PC?')))
+  q.warn.push('Move it'); q.input.push(PASS, PASS); q.save.push({ fsPath: MOVE_OUT }); q.info.push(undefined)
+  await ext._test.onPageMessage({ type: 'moveOut', name: 'mover' })
+  const moved = fs.existsSync(MOVE_OUT) ? moveLib.open(fs.readFileSync(MOVE_OUT, 'utf8'), PASS) : { accounts: [] }
+  check('moved: sealed into the file, and gone from this PC', !profiles.exists(TEST_ROOT, 'mover') &&
+    moved.accounts.length === 1 && moved.accounts[0].payload.credentials.claudeAiOauth.refreshToken === 'RT-MOVER')
+  check('and it says how the other PC imports it', messages.some((m) => m.includes('Moved "mover" out of this PC') && m.includes('Import from a move file')))
+
+  q.quick.push('Import from a move file'); q.open.push([{ fsPath: MOVE_OUT }])
+  q.input.push('not the passphrase'); q.warn.push('Try again'); q.input.push(PASS); q.info.push(undefined)
+  await ext._test.onPageMessage({ type: 'add' })
+  check('Add account imports it, and a wrong passphrase can be typed again', messages.some((m) => m.includes('Wrong passphrase')) &&
+    profiles.exists(TEST_ROOT, 'mover') && profiles.readPayload(TEST_ROOT, 'mover').credentials.claudeAiOauth.refreshToken === 'RT-MOVER')
+  const usedMove = fs.readdirSync(TEST_ROOT).find((x) => x.startsWith('mover.move.imported-'))
+  check('the file is renamed so it can\'t be used twice, and the message says to delete it',
+    !!usedMove && !fs.existsSync(MOVE_OUT) && messages.some((m) => m.includes('Added mover') && m.includes('Delete ')))
+  q.open.push([{ fsPath: path.join(TEST_ROOT, usedMove || 'missing') }])
+  await ext._test.onPageMessage({ type: 'import' })
+  check('a used file is turned away before any passphrase', messages.some((m) => m.includes('was imported once already')))
+  fs.rmSync(path.join(TEST_ROOT, usedMove || 'missing'), { force: true })
+
   console.log('\n-- start a 5-hour session --')
   const secretsLib = require('../lib/secrets.js')
   const evePayload = { credentials: { claudeAiOauth: { accessToken: 'AT-EVE', refreshToken: 'RT-EVE', expiresAt: Date.now() + 6 * 3600e3 } },
@@ -590,6 +627,298 @@ async function main() {
   ext._test.setKickoffRun(async () => ({ ok: false, reason: 'mocked failure' }))
   await ext._test.onPageMessage({ type: 'startSession', name: 'eve' })
   check('a failed run says why', messages.some((m) => m === 'WARN: Couldn\'t start a session for "eve": mocked failure.'))
+  ext._test.setKickoffRun(null)
+
+  console.log('\n-- auto-continue: a chat stopped at a usage limit --')
+  const autoLib = require('../lib/autocontinue.js')
+  const settleNotes = () => new Promise((r) => setTimeout(r, 20))
+  check('on by default, asking first', (ext._test.pageState().autoContinue || {}).mode === 'ask' &&
+    ext._test.pageState().features.autoContinue === true && ext._test.pageState().features.keepAlive === true)
+  const LPROJ = path.join(CLAUDE_DIR, 'projects', 'C--fake-limits')
+  fs.mkdirSync(LPROJ, { recursive: true })
+  const LSID = 'limit-chat-1'
+  const LCHAT = path.join(LPROJ, LSID + '.jsonl')
+  const SESSIONS = path.join(CLAUDE_DIR, 'sessions')
+  fs.mkdirSync(SESSIONS, { recursive: true })
+  const LREC = path.join(SESSIONS, '4242.json')
+  const liveSession = (status) => fs.writeFileSync(LREC, JSON.stringify({ pid: 4242, sessionId: LSID, status, name: 'fake-limits-1',
+    messagingSocketPath: '\\\\.\\pipe\\LOCAL\\cc-msg-0123456789abcdef0123456789abcdef', statusUpdatedAt: Date.now() }))
+  const ago = (sec) => new Date(Date.now() - sec * 1000).toISOString()
+  const stopRec = (uuid, resetMs) => ({ type: 'assistant', uuid, sessionId: LSID, timestamp: ago(300), isApiErrorMessage: true, error: 'rate_limit',
+    message: { model: '<synthetic>', content: [{ type: 'text', text: 'Claude AI usage limit reached|' + Math.floor((resetMs || Date.now() - 120e3) / 1000) }] } })
+  const startOf = (mode) => [{ type: 'custom-title', customTitle: 'Fix the tests' },
+    { type: 'user', timestamp: ago(600), permissionMode: mode || 'auto', message: { role: 'user', content: 'fix the tests' } },
+    { type: 'assistant', sessionId: LSID, timestamp: ago(590), message: { model: 'claude-opus-5-5',
+      usage: { input_tokens: 10, cache_read_input_tokens: 50000 }, content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }] } }]
+  const writeChat = (recs) => {
+    autoLib.updateState(TEST_ROOT, (st) => { for (const e of Object.values(st.stops)) if (e.chat === LSID) e.state = 'done' })
+    fs.writeFileSync(LCHAT, recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  }
+  const addToChat = (recs) => fs.appendFileSync(LCHAT, recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  const peerNotice = () => ({ type: 'user', isMeta: true, timestamp: new Date().toISOString(),
+    origin: { kind: 'peer', name: autoLib.SENDER_NAME, body: autoLib.noticeFor({ kind: 'session' }, 'reset') }, message: { content: 'Another Claude session sent a message' } })
+  const stateOf = (id) => (autoLib.readState(TEST_ROOT).stops[id] || {}).state
+  const sentNotices = []
+  ext._test.setHandoffRun(async (name, msg) => { sentNotices.push({ name, msg }); return { ok: true } })
+
+  writeChat(startOf().concat([stopRec('stop-a')]))
+  liveSession('idle')
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  await settleNotes()
+  check('Ask me: one notification says which chat stopped, and offers to continue it',
+    messages.some((m) => m.startsWith('INFO: "Fix the tests" stopped at its 5-hour limit') && m.includes('can continue it for you')))
+  check('dismissed, nothing is sent and the stop is set aside', sentNotices.length === 0 && stateOf('stop-a') === 'skipped')
+
+  store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+  writeChat(startOf().concat([stopRec('stop-b')]))
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  check('Wait for the reset: it says when it will continue', stateOf('stop-b') === 'waiting' &&
+    messages.some((m) => m.startsWith('INFO: It will continue "Fix the tests" at')))
+  check('and the page lists it, with a way to cancel', (ext._test.pageState().autoContinue.waiting || []).some((w) => w.id === 'stop-b'))
+  await ext._test.checkLimits()
+  check('once the limit has reset, the chat is sent its notice, by name',
+    sentNotices.length === 1 && sentNotices[0].name === 'fake-limits-1' && sentNotices[0].msg.startsWith(autoLib.NOTICE_MARK) &&
+    /has now reset/.test(sentNotices[0].msg) && stateOf('stop-b') === 'sent')
+  autoLib.mark(TEST_ROOT, 'stop-b', { sentAt: Date.now() - 60e3 })
+  addToChat([peerNotice(), { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', id: 'tu2', name: 'Bash', input: {} }] } }])
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  check('when the chat goes back to work, it says so', stateOf('stop-b') === 'continued' && messages.some((m) => m === 'INFO: Continued "Fix the tests" after its usage limit.'))
+
+  writeChat(startOf().concat([stopRec('stop-c')]))
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  await ext._test.checkLimits()
+  autoLib.mark(TEST_ROOT, 'stop-c', { sentAt: Date.now() - 60e3 })
+  addToChat([peerNotice(), { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'That came from another session, so I will wait for you.' }] } }])
+  q.warn.push('Let It Trust Switcher'); q.info.push(undefined)
+  const execBefore = executed.length
+  await ext._test.checkLimits()
+  await settleNotes()
+  check('a chat that only answers gets the fallbacks', stateOf('stop-c') === 'trust' &&
+    messages.some((m) => m.startsWith('WARN: "Fix the tests" answered the notice instead of continuing.')))
+  check('"Let It Trust Switcher" opens the chat with the trust prompt typed in', executed.slice(execBefore).some((x) =>
+    x.id === 'claude-vscode.primaryEditor.open' && x.args[0] === LSID && x.args[1] === autoLib.TRUST_PROMPT))
+  addToChat([{ type: 'user', timestamp: new Date(Date.now() + 1000).toISOString(), permissionMode: 'auto', message: { role: 'user', content: autoLib.TRUST_PROMPT } },
+    { type: 'assistant', timestamp: new Date(Date.now() + 2000).toISOString(), message: { content: [{ type: 'text', text: 'Understood.' }] } }])
+  await ext._test.checkLimits()
+  check('once the user has sent it, the notice goes again', sentNotices.length === 3 && stateOf('stop-c') === 'sent')
+
+  writeChat(startOf('bypassPermissions').concat([stopRec('stop-d')]))
+  ext._test.refreshContext()
+  q.info.push(undefined); q.info.push(undefined)
+  await ext._test.checkLimits()
+  await ext._test.checkLimits()
+  check('a chat that skips permission prompts is never sent the notice: the user is asked instead', sentNotices.length === 3 &&
+    stateOf('stop-d') === 'manual' && messages.some((m) => m.includes('skips permission prompts, so it only takes "continue" from you')))
+
+  fs.rmSync(LREC)
+  writeChat(startOf().concat([stopRec('stop-e')]))
+  ext._test.refreshContext()
+  await ext._test.checkLimits()
+  check('a chat no longer open is left alone (it can\'t be messaged)', stateOf('stop-e') === undefined)
+  liveSession('idle')
+  store.setAutoContinue(TEST_ROOT, { mode: 'off' })
+  await ext._test.checkLimits()
+  check('and with auto-continue off, nothing happens', stateOf('stop-e') === undefined)
+
+  await ext._test.onPageMessage({ type: 'autoContinue', mode: 'switch', pick: 'order', order: ['eve', 'nobody', '../x'] })
+  const acNow = store.getAutoContinue(TEST_ROOT)
+  check('the page sets the mode and the switch order, keeping only saved accounts', acNow.mode === 'switch' && acNow.pick === 'order' &&
+    JSON.stringify(acNow.order) === '["eve"]', JSON.stringify(acNow))
+  autoLib.updateState(TEST_ROOT, (st) => { st.stops['stop-w'] = { id: 'stop-w', title: 'Waiting', state: 'waiting', resetAt: Date.now() + 3600e3, at: Date.now() } })
+  await ext._test.onPageMessage({ type: 'cancelContinue', id: 'stop-w' })
+  check('and cancels a wait', stateOf('stop-w') === 'cancelled')
+  const prevLive = profiles.activeProfile(TEST_ROOT)
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 5, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'room', order: [] })
+  liveSession('idle')
+  writeChat(startOf().concat([stopRec('stop-s')]))
+  ext._test.refreshContext()
+  const expectTo = autoLib.pickAccount(require('../lib/tracker.js').snapshot(TEST_ROOT), { exclude: prevLive, kind: 'session' })
+  await ext._test.checkLimits()
+  await waitFor(() => stateOf('stop-s') !== 'switching', 15000)
+  check('Switch accounts: it switches to the account with the most room, then the notice says so',
+    !!expectTo && profiles.activeProfile(TEST_ROOT) === expectTo && sentNotices.length === 4 &&
+    /switched Claude Code to another/.test(sentNotices[3].msg) && stateOf('stop-s') === 'sent', expectTo + ' / ' + profiles.activeProfile(TEST_ROOT) + ' / sent ' + sentNotices.length + ' / state ' + stateOf('stop-s'))
+  await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 100, resets_at: new Date(Date.now() + 30 * 60e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+  writeChat(startOf().concat([stopRec('stop-n', Date.now() + 3 * 3600e3)]))
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  const waitN = autoLib.readState(TEST_ROOT).stops['stop-n'] || {}
+  check('with no account free, it waits for the first to reset, even another account', waitN.state === 'waiting' && waitN.to === 'eve' &&
+    messages.some((m) => m.includes('No account has room now, so it will continue "Fix the tests"') && m.includes('on eve, the first account with room again')),
+    JSON.stringify(waitN))
+  autoLib.mark(TEST_ROOT, 'stop-n', { resetAt: Date.now() - 61e3 })
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 100, resets_at: new Date(Date.now() - 61e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  await ext._test.checkLimits()
+  await waitFor(() => stateOf('stop-n') === 'sent', 15000)
+  check('and when it does, it switches to that account and continues the chat there', profiles.activeProfile(TEST_ROOT) === 'eve' &&
+    stateOf('stop-n') === 'sent' && /switched Claude Code to another/.test(sentNotices[sentNotices.length - 1].msg))
+  await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 5, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+  const taskNote = (sec) => ({ type: 'user', timestamp: ago(sec), message: { role: 'user',
+    content: '<task-notification>\n<task-id>ad5e9db18511dc76d</task-id>\n</task-notification>' } })
+  writeChat(startOf().concat([stopRec('stop-t'), taskNote(299), taskNote(285), taskNote(284)]))
+  liveSession('idle')
+  ext._test.refreshContext()
+  await ext._test.checkLimits()
+  await waitFor(() => stateOf('stop-t') === 'sent', 15000)
+  check('a stop followed by background agents reporting back still switches and continues the chat',
+    stateOf('stop-t') === 'sent' && profiles.activeProfile(TEST_ROOT) === 'eve', stateOf('stop-t') + ' / ' + profiles.activeProfile(TEST_ROOT))
+  addToChat([stopRec('stop-t2')])
+  ext._test.refreshContext()
+  await ext._test.checkLimits()
+  check('and a second stop record in the same chat is the same episode, not a new one', stateOf('stop-t2') === undefined)
+  await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  console.log('\n-- switching early, before the limit stops anything --')
+  const inHours = (h) => new Date(Date.now() + h * 3600e3).toISOString()
+  const liveUsage = (session, weekly) => usageLib.writeLiveCache(TEST_ROOT, null, { limits: [
+    { kind: 'session', percent: session, resets_at: inHours(2) }, { kind: 'weekly_all', percent: weekly, resets_at: inHours(90) }] })
+  const eveUsage = (session, weekly) => usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: session, resets_at: inHours(4) }, { kind: 'weekly_all', percent: weekly, resets_at: inHours(100) }] }, Date.now())
+  const freshEarly = () => autoLib.updateState(TEST_ROOT, (st) => { st.early = {} })
+  const msgsFrom = (n) => messages.slice(n)
+  await ext._test.onPageMessage({ type: 'autoContinue', mode: 'switch', pick: 'order', order: ['eve'], early: 80 })
+  check('the page sets the share to switch at', store.getAutoContinue(TEST_ROOT).early === 80)
+  await ext._test.onPageMessage({ type: 'autoContinue', early: 95 })
+  check('and only between 50% and 90%', store.getAutoContinue(TEST_ROOT).early === 80)
+
+  liveUsage(85, 20); eveUsage(10, 20); freshEarly()
+  let mark = messages.length
+  ext._test.earlySwitchCheck()
+  await waitFor(() => profiles.activeProfile(TEST_ROOT) === 'eve', 15000)
+  check('at 85% of its 5-hour limit (the share is 80%), it switches to the next account',
+    profiles.activeProfile(TEST_ROOT) === 'eve', profiles.activeProfile(TEST_ROOT))
+  await waitFor(() => msgsFrom(mark).some((m) => m.includes('Switched to eve')), 3000)
+  check('and says so, with a way back, without the usual "Now signed in" message',
+    msgsFrom(mark).some((m) => m.startsWith('INFO: Switched to eve: ') && m.includes('reached 85% of its 5-hour limit') && m.includes('Work carries on')) &&
+    !msgsFrom(mark).some((m) => m.includes('Now signed in as')), msgsFrom(mark).join(' | '))
+  await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+  liveUsage(86, 20)
+  mark = messages.length
+  ext._test.earlySwitchCheck()
+  await new Promise((r) => setTimeout(r, 300))
+  check('switched back by hand, it doesn\'t switch again in that same 5-hour window', profiles.activeProfile(TEST_ROOT) === prevLive &&
+    !msgsFrom(mark).some((m) => m.includes('Switched to')), profiles.activeProfile(TEST_ROOT) + ' / ' + prevLive + ' / ' + msgsFrom(mark).join(' | '))
+
+  await ext._test.onPageMessage({ type: 'autoContinue', mode: 'ask' })
+  freshEarly(); q.info.push('Not Now')
+  mark = messages.length
+  ext._test.earlySwitchCheck()
+  await new Promise((r) => setTimeout(r, 300))
+  check('"Ask me" asks first, and "Not Now" leaves the account as it is', profiles.activeProfile(TEST_ROOT) === prevLive &&
+    msgsFrom(mark).some((m) => m.includes('Switch to eve now, so work doesn\'t stop?')), profiles.activeProfile(TEST_ROOT) + ' / ' + msgsFrom(mark).join(' | '))
+  mark = messages.length
+  ext._test.earlySwitchCheck()
+  check('and it isn\'t asked again in that window', !msgsFrom(mark).some((m) => m.includes('Switch to eve now')))
+
+  await ext._test.onPageMessage({ type: 'autoContinue', mode: 'switch' })
+  liveUsage(20, 96); freshEarly()
+  mark = messages.length
+  ext._test.earlySwitchCheck()
+  await waitFor(() => profiles.activeProfile(TEST_ROOT) === 'eve', 15000)
+  check('95% of the weekly limit switches too, however low the 5-hour use', profiles.activeProfile(TEST_ROOT) === 'eve' &&
+    msgsFrom(mark).some((m) => m.includes('reached 96% of its weekly limit')), profiles.activeProfile(TEST_ROOT) + ' / ' + msgsFrom(mark).join(' | '))
+  await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  liveUsage(85, 20); eveUsage(75, 20); freshEarly()
+  ext._test.earlySwitchCheck()
+  await new Promise((r) => setTimeout(r, 300))
+  check('no switch to an account that isn\'t well under the share (75% against 80%)', profiles.activeProfile(TEST_ROOT) === prevLive)
+  eveUsage(10, 92); freshEarly()
+  ext._test.earlySwitchCheck()
+  await new Promise((r) => setTimeout(r, 300))
+  check('nor to one at 90% of its week or more', profiles.activeProfile(TEST_ROOT) === prevLive)
+  await ext._test.onPageMessage({ type: 'autoContinue', early: null })
+  eveUsage(10, 20); freshEarly()
+  ext._test.earlySwitchCheck()
+  await new Promise((r) => setTimeout(r, 300))
+  check('and with the share off ("hits its limit"), it never switches early', profiles.activeProfile(TEST_ROOT) === prevLive &&
+    store.getAutoContinue(TEST_ROOT).early === null)
+
+  console.log('\n-- the live account\'s usage, every 2 minutes --')
+  const liveCacheFile = usageLib.cachePath(TEST_ROOT, null)
+  const liveKey = usageLib.accountKey(null)
+  let reads = 0
+  ext._test.setLiveUsageRun(async () => { reads++; return { ok: true, utilization: { limits: [{ kind: 'session', percent: 12, resets_at: inHours(3) }] } } })
+  fs.rmSync(liveCacheFile, { force: true })
+  await ext._test.pollLiveUsage()
+  check('read when 2 minutes old (or never read)', reads === 1 && (usageLib.readLiveCache(TEST_ROOT, null) || {}).session.percent === 12)
+  await ext._test.pollLiveUsage()
+  check('and not again while it is fresh: one read per interval for every window together', reads === 1)
+  fs.rmSync(liveCacheFile, { force: true })
+  const liveCfgBefore = fs.readFileSync(LIVE_CFG, 'utf8')
+  const liveCfgNow = JSON.parse(liveCfgBefore)
+  liveCfgNow.cachedUsageUtilization = { fetchedAtMs: Date.now(), accountUuid: (liveCfgNow.oauthAccount || {}).accountUuid,
+    utilization: { limits: [{ kind: 'session', percent: 30, resets_at: inHours(3) }] } }
+  fs.writeFileSync(LIVE_CFG, JSON.stringify(liveCfgNow))
+  await ext._test.pollLiveUsage()
+  check('nor when Claude Code has just read it itself', reads === 1)
+  fs.writeFileSync(LIVE_CFG, liveCfgBefore)
+  ext._test.setLiveUsageRun(async () => { reads++; return { ok: false, rateLimited: true, retryAfterMs: 60000 } })
+  await ext._test.pollLiveUsage()
+  await ext._test.pollLiveUsage()
+  check('a "too many requests" pauses it, for every window', reads === 2 && usageLib.pausedUntil(TEST_ROOT, liveKey) > Date.now())
+  usageLib.pauseUntil(TEST_ROOT, liveKey, 0)
+  ext._test.setLiveUsageRun(null)
+  fs.rmSync(liveCacheFile, { force: true })
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [] }, Date.now())
+  store.setAutoContinue(TEST_ROOT, { mode: 'ask', pick: 'room', order: [] })
+  ext._test.setHandoffRun(null)
+  fs.rmSync(LPROJ, { recursive: true, force: true })
+  fs.rmSync(LREC, { force: true })
+  ext._test.refreshContext()
+
+  console.log('\n-- keep alive --')
+  check('off for every account at first', ext._test.pageState().accounts.every((a) => a.keepAlive === false))
+  await ext._test.onPageMessage({ type: 'keepAlive', name: 'eve', on: true })
+  check('the menu turns it on for one account', store.getKeepAlive(TEST_ROOT, 'eve') &&
+    ext._test.pageState().accounts.find((a) => a.name === 'eve').keepAlive === true)
+  const kept = []
+  ext._test.setKickoffRun(async (dir) => { kept.push(dir); return { ok: true } })
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 64, resets_at: new Date(Date.now() - 60e3).toISOString() },
+    { kind: 'weekly_all', percent: 30, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  await ext._test.keepAliveTick()
+  check('when its 5-hour window has ended, it gets a "hi" to start the next one', kept.length === 1)
+  await ext._test.keepAliveTick()
+  check('only once, however often it checks', kept.length === 1)
+  autoLib.updateState(TEST_ROOT, (st) => { st.keepAlive.eve = 0 })
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 3, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
+    { kind: 'weekly_all', percent: 30, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  await ext._test.keepAliveTick()
+  check('never while a session is running', kept.length === 1)
+  await ext._test.onPageMessage({ type: 'keepAlive', name: 'eve', on: false })
+  check('and it turns off again', !store.getKeepAlive(TEST_ROOT, 'eve'))
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [] }, Date.now())
   ext._test.setKickoffRun(null)
   profiles.remove(TEST_ROOT, 'eve')
   q.warn.push(undefined)
@@ -709,12 +1038,22 @@ async function main() {
   const relFeatures = ext._test.pageState().features
   check('since 1.2.0 the release has "login for another PC", ▶ "start a 5-hour session" and chat context',
     relFeatures.spareLogin === true && relFeatures.startSession === true && relFeatures.context === true)
+  check('and since 1.3.0, moving accounts between PCs', relFeatures.transfer === true)
   check('and ▶\'s command, for the usage hover\'s links', !!registered['claudeswitcher.startSession'])
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: true })
   disposeAll(run.c)
   delete process.env.CLAUDE_CONFIG_DIR
   vscode.workspace.workspaceFolders = []
   ext._test.stopLoginWatchers()
+
+  console.log('\n-- an older copy, from before the Marketplace id, still installed --')
+  const warnsBefore = messages.length
+  vscode.extensions = { getExtension: (id) => (id === 'local.claude-account-switcher' ? { id } : undefined) }
+  run = activateFresh({ claudeswitcher: { edition: 'main' } })
+  check('this one registers nothing and sets no pin, so the two never clash', Object.keys(registered).length === 0)
+  check('and offers to uninstall the old one', messages.slice(warnsBefore).some((m) => m.includes('installed twice') && m.includes('local.claude-account-switcher')))
+  delete vscode.extensions
+  disposeAll(run.c)
 
   console.log('\n-- name validation --')
   check('rejects path traversal', !store.validName('../evil'))

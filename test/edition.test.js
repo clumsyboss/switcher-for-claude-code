@@ -113,6 +113,7 @@ check('"Make a login for another PC" was promoted into the release in 1.2.0',
 check('so was "Start a 5-hour session", with its command', edition.hasFeature(edition.EXPERIMENTAL, 'startSession') &&
   edition.hasFeature(edition.MAIN, 'startSession') && edition.includes(edition.MAIN, 'startSession'))
 check('and the chat context display', edition.hasFeature(edition.EXPERIMENTAL, 'context') && edition.hasFeature(edition.MAIN, 'context'))
+check('moving accounts between PCs was promoted in 1.3.0', edition.hasFeature(edition.EXPERIMENTAL, 'transfer') && edition.hasFeature(edition.MAIN, 'transfer'))
 check('an unknown feature is off everywhere', !edition.hasFeature(edition.EXPERIMENTAL, 'nope') && !edition.hasFeature(edition.MAIN, 'nope'))
 
 console.log('\n-- a promoted command that package.json forgot is caught --')

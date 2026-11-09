@@ -155,6 +155,113 @@ console.log('\n-- the file format, version 2 (L4) --')
   check('a truncated authentication tag is refused', e2 && /damaged/.test(e2.message))
 }
 
-fs.rmSync(TMP, { recursive: true, force: true })
-console.log('\n' + passed + ' passed, ' + failed + ' failed')
-assert.strictEqual(failed, 0, 'move tests failed')
+async function pageTransfer() {
+  const transfer = require('../lib/transfer.js')
+  const codeOf = async (fn) => { try { await fn(); return null } catch (e) { return e.code || e.message } }
+  const HOME = path.join(TMP, 'home')
+  fs.mkdirSync(path.join(HOME, '.claude'), { recursive: true })
+  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'live@example.com' } }))
+  const O = { home: HOME, waitMs: 2000 }
+  const saveTo = (rootDir, a) => {
+    store.ensureRoot(rootDir)
+    fs.mkdirSync(profiles.profilesDir(rootDir), { recursive: true })
+    fs.writeFileSync(path.join(profiles.profilesDir(rootDir), a.name + '.enc'), secrets.protect(Buffer.from(JSON.stringify(a.payload))))
+    profiles.writeMeta(rootDir, a.name, a.meta)
+  }
+  const tokenOf = (rootDir, name) => profiles.readPayload(rootDir, name).credentials.claudeAiOauth.refreshToken
+
+  console.log('\n-- "Move to another PC…" (lib/transfer.js) --')
+  const P = path.join(TMP, 'page-pc')
+  saveTo(P, account('Travel', 'RT-TRAVEL'))
+  saveTo(P, account('Live', 'RT-LIVE'))
+  store.setDisplay(P, 'Travel', { label: 'Travel kit', icon: 'rocket', color: 'teal' })
+  store.setRemote(P, 'Travel', 'off')
+  const f = path.join(TMP, 'travel.move')
+  check('the account Claude Code is using is refused, and stays', await codeOf(() => transfer.exportAccounts(P, ['Live'], PASS, f, O)) === 'ELIVE' &&
+    profiles.exists(P, 'Live') && !fs.existsSync(f))
+  check('so is a passphrase that is too short', await codeOf(() => transfer.exportAccounts(P, ['Travel'], 'short', f, O)) === 'EPASSPHRASE')
+  const res = await transfer.exportAccounts(P, ['Travel'], PASS, f, O)
+  check('moved: the file holds it, and it is gone from this PC', res.moved[0] === 'Travel' && fs.existsSync(f) && !profiles.exists(P, 'Travel'))
+  check('a copy of what left stays in backups/', res.backups.length === 1 && fs.existsSync(res.backups[0]))
+  if (process.platform !== 'win32') check('the file is private (0600)', (fs.statSync(f).mode & 0o777) === 0o600)
+  check('an existing file is never written over unless asked', await codeOf(() => transfer.exportAccounts(P, ['Live'], PASS, f, { ...O, home: TMP })) === 'EEXIST')
+
+  console.log('\n-- "Import from a move file" --')
+  let e = await codeOf(() => transfer.readFile(f, 'wrong passphrase 9'))
+  check('a wrong passphrase says so, so the page can ask again', e === 'EPASSPHRASE')
+  const Q = path.join(TMP, 'page-other-pc')
+  const read = transfer.readFile(f, PASS)
+  check('the file is read and checked before anything is saved', read.accounts.length === 1 && !fs.existsSync(Q))
+  check('a new account will be added', transfer.planFor(Q, read.accounts[0], read.exportedAt, O).action === 'add')
+  let got = await transfer.importAccounts(Q, read, O)
+  check('added, with its own login', got.added[0] === 'Travel' && tokenOf(Q, 'Travel') === 'RT-TRAVEL')
+  check('and its name, icon, colour and Remote Control choice', store.displayOf(Q, 'Travel').label === 'Travel kit' &&
+    store.displayOf(Q, 'Travel').icon === 'rocket' && store.getRemote(Q, 'Travel') === 'off')
+  const used = transfer.markImported(f)
+  check('the file is renamed once used', !!used && transfer.wasImported(used) && !fs.existsSync(f))
+  check('and the renamed file is refused', await codeOf(() => transfer.readFile(used, PASS)) === 'EUSED')
+
+  const again = path.join(TMP, 'travel-newer.move')
+  fs.writeFileSync(again, moveLib.seal({ exportedAt: new Date(Date.now() + 60000).toISOString(), accounts: [account('Travel', 'RT-TRAVEL-2')] }, PASS))
+  const r2 = transfer.readFile(again, PASS)
+  check('the same account with an older login here asks first', transfer.planFor(Q, r2.accounts[0], r2.exportedAt, O).action === 'replace')
+  got = await transfer.importAccounts(Q, r2, O)
+  check('not chosen: it is left as it is', got.skipped[0] && /left as it is/.test(got.skipped[0].reason) && tokenOf(Q, 'Travel') === 'RT-TRAVEL')
+  got = await transfer.importAccounts(Q, r2, { ...O, replace: ['Travel'] })
+  check('chosen: the newer login takes its place', got.replaced[0] === 'Travel' && tokenOf(Q, 'Travel') === 'RT-TRAVEL-2')
+  const twin = account('Travel2', 'RT-TWIN')
+  twin.payload.identity.oauthAccount.emailAddress = 'travel@example.com'
+  twin.meta.email = 'travel@example.com'
+  const r3 = { exportedAt: new Date().toISOString(), accounts: [moveLib.validateAccount(twin, store).account], invalid: [] }
+  check('the same account under another name is not saved twice', /already saved here as "Travel"/.test(transfer.planFor(Q, r3.accounts[0], r3.exportedAt, O).reason || ''))
+
+  console.log('\n-- every file people already have keeps importing (test/fixtures) --')
+  const FIX = path.join(__dirname, 'fixtures')
+  const FIX_PASS = 'fixture passphrase 1'
+  const r1 = transfer.readFile(path.join(FIX, 'move-format-1.move'), FIX_PASS)
+  const R1 = path.join(TMP, 'fixture-1-pc')
+  got = await transfer.importAccounts(R1, r1, O)
+  check('format 1, as 1.1.0\'s "Make a login for another PC" wrote it', got.added.join() === 'Fixture-Spare' &&
+    tokenOf(R1, 'Fixture-Spare') === 'fixture-refresh-Fixture-Spare' && store.displayOf(R1, 'Fixture-Spare').label === 'Fixture Spare' &&
+    profiles.readMeta(R1, 'Fixture-Spare').accountUuid === 'uuid-fixture-spare')
+  const r2f = transfer.readFile(path.join(FIX, 'move-format-2.move'), FIX_PASS)
+  const R2 = path.join(TMP, 'fixture-2-pc')
+  got = await transfer.importAccounts(R2, r2f, O)
+  check('format 2, as 1.2.0\'s move-accounts.js wrote it, both accounts', got.added.join() === 'Fixture-Work,Fixture-Home' &&
+    tokenOf(R2, 'Fixture-Home') === 'fixture-refresh-Fixture-Home')
+  check('with their Remote Control and Artifacts choices', store.getRemote(R2, 'Fixture-Work') === 'off' &&
+    store.getArtifacts(R2, 'Fixture-Work') === 'off' && store.getRemote(R2, 'Fixture-Home') === 'on')
+  check('reading a fixture never changes it', fs.readdirSync(FIX).filter((x) => x.endsWith('.move')).length === 2 &&
+    !fs.readdirSync(FIX).some((x) => transfer.wasImported(x)))
+  const future = JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(FIX, 'move-format-2.move'), 'utf8')), magic: 'claude-switcher-move/3' })
+  e = null
+  try { moveLib.open(future, FIX_PASS) } catch (x) { e = x }
+  check('a file from a newer version says to update, instead of "not a move file"', e && e.code === 'ENEWER' && /newer version/.test(e.message))
+
+  if (fs.existsSync(SCRIPT)) {
+    console.log('\n-- the page and the script read each other\'s files --')
+    const S = path.join(TMP, 'script-pc')
+    saveTo(P, account('Roam', 'RT-ROAM'))
+    const g = path.join(TMP, 'roam.move')
+    await transfer.exportAccounts(P, ['Roam'], PASS, g, O)
+    const r = cp.spawnSync(process.execPath, [SCRIPT, 'import', g], {
+      encoding: 'utf8', env: { ...process.env, CLAUDE_SWITCHER_ROOT: S, MOVE_PASSPHRASE: PASS }, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    check('a file the page made imports with the script', /Added: Roam/.test(r.stdout) && tokenOf(S, 'Roam') === 'RT-ROAM', r.stdout + r.stderr)
+    const back = path.join(TMP, 'roam-back.move')
+    const x = cp.spawnSync(process.execPath, [SCRIPT, 'export', back, 'Roam'], {
+      encoding: 'utf8', env: { ...process.env, CLAUDE_SWITCHER_ROOT: S, MOVE_PASSPHRASE: PASS }, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const T = path.join(TMP, 'page-third-pc')
+    got = x.status === 0 ? await transfer.importAccounts(T, transfer.readFile(back, PASS), O) : { added: [] }
+    check('and one the script made imports on the page', got.added[0] === 'Roam' && tokenOf(T, 'Roam') === 'RT-ROAM', x.stdout + x.stderr)
+  }
+}
+
+pageTransfer()
+  .catch((e) => { failed++; console.log('  FAIL crashed: ' + (e && e.stack)) })
+  .finally(() => {
+    fs.rmSync(TMP, { recursive: true, force: true })
+    console.log('\n' + passed + ' passed, ' + failed + ' failed')
+    assert.strictEqual(failed, 0, 'move tests failed')
+  })

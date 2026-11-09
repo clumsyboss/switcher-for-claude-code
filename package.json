@@ -1,9 +1,9 @@
 {
-  "name": "claude-account-switcher",
+  "name": "account-switcher-claude-code",
   "displayName": "Switcher for Claude Code (Experimental)",
   "description": "Switch between Claude accounts in VS Code, see every account's limits, and pin folders to their own account.",
-  "version": "1.2.0",
-  "publisher": "local",
+  "version": "1.3.0",
+  "publisher": "clumsyboss",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -14,7 +14,7 @@
     "edition": "experimental"
   },
   "scripts": {
-    "test": "node test/harness.js && node test/profiles.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js",
+    "test": "node test/harness.js && node test/profiles.test.js && node test/switch.test.js && node test/preferences.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js && node test/autocontinue.test.js",
     "stage": "node build.js --no-package",
     "package": "node build.js",
     "package:main": "node build.js main",
