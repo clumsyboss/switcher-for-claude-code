@@ -196,7 +196,7 @@
       state.features && state.features.transfer
         ? item('upload', 'Move to another PC…', () => send('moveOut', { name: a.name }))
         : null,
-      state.features && state.features.keepAlive
+      state.features && state.features.keepAlive && !a.noSession
         ? h('button', { role: 'menuitemcheckbox', 'aria-checked': a.keepAlive ? 'true' : 'false', tabindex: '-1',
           title: 'Starts the next 5-hour session as soon as one ends',
           onclick: () => { closeMenu(false); send('keepAlive', { name: a.name, on: !a.keepAlive }) } },
@@ -253,6 +253,10 @@
       sw)
   }
 
+  function orgText(org) {
+    return org && !/'s Organization$/.test(org) ? org : null
+  }
+
   function card(a) {
     const s = state
     const switching = busy.has('switch:' + a.name)
@@ -265,7 +269,7 @@
       icon('pin', 'sm'), String(pins.length))
       : null
     const running = !!(a.session && !a.session.resetSince && a.session.resetsAt && Date.parse(a.session.resetsAt) > now())
-    const startBtn = s.features && s.features.startSession && !a.active && !a.needsLogin
+    const startBtn = s.features && s.features.startSession && !a.active && !a.needsLogin && !a.noSession
       ? h('button', { class: 'icon-btn start' + (a.keepAlive ? ' keep' : ''), disabled: running || a.starting || null,
         title: (a.starting ? 'Starting a 5-hour session…'
           : running ? 'Session running · resets in ' + (until(Date.parse(a.session.resetsAt)) || 'a moment') : 'Start a 5-hour session') +
@@ -303,7 +307,7 @@
       h('div', { class: 'card-head' }, avatar(a, 'avatar'),
         h('div', { class: 'ident' },
           h('div', { class: 'name', text: a.label }),
-          h('div', { class: 'sub', text: [a.email, a.org].filter(Boolean).join(' · ') || a.name })),
+          h('div', { class: 'sub', text: [a.email, a.plan, orgText(a.org)].filter(Boolean).join(' · ') || a.name })),
         h('div', { class: 'head-actions' }, startBtn, pinBtn, moreBtn)),
       ctxGrid,
       a.needsLogin
@@ -312,7 +316,9 @@
           h('button', { class: 'btn soft sm', onclick: () => send('relogin', { name: a.name }) }, 'Sign in again'))
         : null,
       a.needsLogin ? null : h('div', { class: 'meters' },
-        meter(a.name + ':5h', 'Session Limit', a.session),
+        a.noSession
+          ? meter(a.name + ':model', ((a.scoped && a.scoped.model) || 'Model') + ' Limit', a.scoped)
+          : meter(a.name + ':5h', 'Session Limit', a.session),
         meter(a.name + ':wk', 'Weekly Limit', a.weekly)),
       h('div', { class: 'card-foot' },
         toggle('Remote Control', 'Remote', !a.remoteOff, 'Remote Control for ' + a.label,

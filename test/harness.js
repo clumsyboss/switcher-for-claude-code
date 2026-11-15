@@ -425,6 +425,11 @@ async function main() {
   check('and the page gets the new state', panel.webview.posted.length > postedBefore &&
     panel.webview.posted[panel.webview.posted.length - 1].state.accounts.find((a) => a.name === 'work').label === 'Work / Acme')
   check('no colour chosen: the page picks one from the name', ext._test.pageState().accounts.find((a) => a.name === 'work').color === null)
+  const order = () => ext._test.pageState().accounts.map((a) => a.label).join(',')
+  check('cards are in the order of the names shown', order() === 'dana,late,Work / Acme', order())
+  await ext._test.onPageMessage({ type: 'edit', name: 'work', label: 'alpha', icon: 'briefcase' })
+  check('and a rename moves the card to its new place, ignoring case', order() === 'alpha,dana,late', order())
+  await ext._test.onPageMessage({ type: 'edit', name: 'work', label: 'Work / Acme', icon: 'briefcase' })
   await ext._test.onPageMessage({ type: 'edit', name: 'work', label: 'Work / Acme', icon: 'briefcase', color: 'teal' })
   check('a colour can be chosen', store.displayOf(TEST_ROOT, 'work').color === 'teal' &&
     ext._test.pageState().accounts.find((a) => a.name === 'work').color === 'teal')

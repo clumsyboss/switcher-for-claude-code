@@ -46,6 +46,10 @@ function root() { return store.getRoot(vscode) }
 
 function labelOf(name) { return (name && store.displayOf(root(), name).label) || name }
 
+function byLabel(a, b) {
+  return String(labelOf(a.name)).localeCompare(String(labelOf(b.name)), undefined, { numeric: true, sensitivity: 'base' })
+}
+
 function windowPinnedDir() {
   const v = process.env.CLAUDE_CONFIG_DIR
   return v && v.trim() ? v.trim() : null
@@ -281,7 +285,7 @@ function snapshotRows() {
 }
 
 function usageTooltip(cur, usage) {
-  let rows = snapshotRows()
+  let rows = snapshotRows().sort((a, b) => (b.active - a.active) || byLabel(a, b))
   if (!rows.length) {
     const now = Date.now()
     const top = usage && usage.scoped && usage.scoped[0]
@@ -313,7 +317,7 @@ function usageTooltip(cur, usage) {
       }
     }
     const cells = r.needsLogin ? ['n/a' + GAP, 'n/a' + GAP, 'n/a']
-      : [useCell(r.session, true) + GAP, useCell(r.weekly, true) + GAP, useCell(r.scoped, false)]
+      : [(r.noSession ? 'none' : useCell(r.session, true)) + GAP, useCell(r.weekly, true) + GAP, useCell(r.scoped, false)]
     table.push('| ' + (r.name && r.name === cur.name ? '$(check)' : '') + ' | ' + name + ' | ' + cells.join(' | ') + ' |')
   }
 
@@ -338,7 +342,7 @@ function sessionRunning(limit) {
 
 function canStartSession(row) {
   return editionLib.hasFeature(edition, 'startSession') && !!row && !!row.name && !row.active && !row.needsLogin &&
-    !sessionRunning(row.session) && !startingSessions.has(row.name)
+    !row.noSession && !sessionRunning(row.session) && !startingSessions.has(row.name)
 }
 
 async function startSessionFor(nameArg) {
@@ -1118,9 +1122,10 @@ function globalItems() {
     if (!r) return null
     if (r.needsLogin) return 'sign in again'
     if (!r.session && !r.weekly) return null
+    if (r.noSession) return 'weekly ' + useCell(r.weekly, false) + (r.scoped ? ' · ' + r.scoped.model + ' ' + useCell(r.scoped, false) : '')
     return '5h ' + useCell(r.session, false) + ' · weekly ' + useCell(r.weekly, false)
   }
-  return profilesLib.list(root()).map((p) => ({
+  return profilesLib.list(root()).sort(byLabel).map((p) => ({
     label: (p.name === active ? '$(check) ' : '$(blank) ') + labelOf(p.name),
     description: [figures(p.name), p.email, p.org].filter(Boolean).join('  ·  '),
     name: p.name,
@@ -1337,7 +1342,7 @@ async function doSwitch(name, opts) {
 }
 
 function accountItems(current) {
-  return profilesLib.list(root()).map((p) => ({
+  return profilesLib.list(root()).sort(byLabel).map((p) => ({
     label: (p.name === current ? '$(pin) ' : '$(blank) ') + labelOf(p.name),
     description: [p.email, windowsLib.hasLogin(root(), p.name) ? 'window login ready' : 'needs a one-time sign-in']
       .filter(Boolean).join('  ·  '),
@@ -1585,7 +1590,7 @@ async function makeSpareLogin(nameArg) {
       name,
       payload: { credentials, identity, capturedAt },
       meta: { email: got || expected, org: o.organizationName || meta.org || null, subscription: o.seatTier || null,
-        capturedAt, accountUuid: o.accountUuid || meta.accountUuid || null },
+        plan: profilesLib.planOf(o, credentials), capturedAt, accountUuid: o.accountUuid || meta.accountUuid || null },
       display: store.displayOf(root(), name),
       remote: store.getRemote(root(), name),
       artifacts: store.getArtifacts(root(), name),
@@ -1992,7 +1997,7 @@ function pageState() {
       pinnedTo: pinnedHere() ? pinState.name : null,
       pinnedLabel: pinnedHere() ? labelOf(pinState.name) : null,
     },
-    accounts: profilesLib.list(root()).map((p) => {
+    accounts: profilesLib.list(root()).sort(byLabel).map((p) => {
       const r = rows.find((x) => x.name === p.name) || {}
       const disp = store.displayOf(root(), p.name)
       const hasWindowDir = windowNames.includes(p.name)
@@ -2012,8 +2017,11 @@ function pageState() {
         starting: startingSessions.has(p.name),
         keepAlive: store.getKeepAlive(root(), p.name),
         context: contextOf[p.name] || null,
+        plan: p.plan || null,
         session: r.session || null,
         weekly: r.weekly || null,
+        scoped: r.scoped || null,
+        noSession: !!r.noSession,
         fetchedAtMs: r.fetchedAtMs || null,
         windowLogin: hasWindowDir ? { signedIn: windowsLib.hasLogin(root(), p.name), email: (wid && wid.email) || null } : null,
         pinCount: pinCount(p.name),
@@ -2182,6 +2190,9 @@ function activate(context) {
 
   pinState = null
   applyPin()
+
+  const claudeExt = vscode.extensions && vscode.extensions.getExtension('anthropic.claude-code')
+  if (claudeExt) claude.addBundledHint(claudeExt.extensionPath)
 
   output = vscode.window.createOutputChannel('Switcher for Claude Code')
   context.subscriptions.push(output)

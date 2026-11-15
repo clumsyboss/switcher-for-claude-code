@@ -130,6 +130,20 @@ Click a name to switch to that account globally (pinned folders are unaffected).
 real number now. The **▶** next to an account that isn't live starts its 5-hour
 session (see [Starting a 5-hour session early](#starting-a-5-hour-session-early)).
 
+### Plans
+
+Each account's card shows its plan next to its email, such as **Max 20x**,
+**Team 5x** or **Pro**, as its own login reports it. An account saved before
+1.3.1 shows it after its next background renewal or switch.
+
+Some plans have no 5-hour limit, only weekly ones. For those, the card shows the
+model's weekly limit (Fable) where the 5-hour bar would be, the status bar shows
+two figures (`62% | 98%`, Fable then weekly), and the hover says "none" under
+5-hour. **▶** and **Keep alive** don't appear for them: there is no 5-hour
+window to start.
+
+Accounts are listed in the order of the names you see, so renaming one moves it.
+
 **How the figures stay live.** A saved account's login expires 8 hours after it
 was last renewed. To keep reading usage for accounts you are not using, the
 extension renews each saved login in the background once it has less than an
@@ -520,15 +534,23 @@ time you switch away.
 window login yet. Click **Sign In Now** on the message.
 
 **`claude` not found** · The extension checks the usual install locations for
-your platform (`AppData\Roaming\npm\...` on Windows; `~/.local/bin`,
-`/opt/homebrew/bin`, `/usr/local/bin` elsewhere), then falls back to `where` /
-`which`. Install Claude Code, or put it on `PATH`.
+your platform (`AppData\Roaming\npm\...` and `~\.local\bin` on Windows;
+`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` elsewhere), then `where` /
+`which`, then the copy of `claude` that comes inside the Claude Code extension.
+So this only appears when the Claude Code extension isn't installed either:
+install it, or install Claude Code's command-line tool.
 
 **Anything else** · Run **Claude Accounts: Show Status** and send the output
 from the "Switcher for Claude Code" output channel. It contains no token
 material.
 
 ## Upgrading from an earlier version
+
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
+### From 1.3.0
+
+Installing 1.3.1 upgrades it in place, and everything carries over.
 
 ### From 1.2
 

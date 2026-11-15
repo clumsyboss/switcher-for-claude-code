@@ -8,7 +8,7 @@ const ROOT = __dirname
 const DIST = path.join(ROOT, 'dist')
 const PREFIX = 'claudeswitcher.'
 
-const PAYLOAD = ['extension.js', 'lib', 'ui', 'media', 'README.md', 'LICENSE']
+const PAYLOAD = ['extension.js', 'lib', 'ui', 'media', 'README.md', 'CHANGELOG.md', 'LICENSE']
 
 function read(file) { return JSON.parse(fs.readFileSync(path.join(ROOT, file), 'utf8')) }
 
