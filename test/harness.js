@@ -260,6 +260,7 @@ async function main() {
   const ctx = { subscriptions: [], globalState: { get: (k) => mainState.get(k), update: async (k, v) => { mainState.set(k, v) } } }
   q.warn.push('Clear It')
   ext._test.setTrackerAuto(false)
+  ext._test.setLoginAuto(false)
   ext.activate(ctx)
   await tick()
   check('root directory created', fs.existsSync(TEST_ROOT))

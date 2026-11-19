@@ -923,6 +923,7 @@ async function refreshLiveQuietly() {
 }
 
 let trackerAuto = true
+let loginAuto = true
 
 async function trackerTick(opts) {
   if (trackerRunning || !trackingEnabled()) return
@@ -3745,8 +3746,8 @@ function activate(context) {
 
   try { cleanupSigninDirs() } catch (e) { log('sign-in cleanup: ' + (e && e.message)) }
   startupLogins().then(() => { afterLoginChange(); writePinnedSettingsAll() }, (e) => log('logins: ' + (e && e.message)))
-  const loginTimer = setInterval(() => { loginWatch().catch((e) => log('login watch: ' + (e && e.message))) }, LOGIN_WATCH_MS)
-  const loginChangeTimer = setInterval(() => { fastTick().catch((e) => log('/login watch: ' + (e && e.message))) }, WAITING_CHECK_MS)
+  const loginTimer = loginAuto ? setInterval(() => { loginWatch().catch((e) => log('login watch: ' + (e && e.message))) }, LOGIN_WATCH_MS) : null
+  const loginChangeTimer = loginAuto ? setInterval(() => { fastTick().catch((e) => log('/login watch: ' + (e && e.message))) }, WAITING_CHECK_MS) : null
   context.subscriptions.push({ dispose: () => {
     clearInterval(loginChangeTimer)
     clearInterval(loginTimer)
@@ -3786,6 +3787,7 @@ module.exports = {
     setSigninStart: (fn) => { signinStart = fn || ((o) => signinLib.start(o)) },
     uiAsk: (spec) => ui.ask(spec),
     setTrackerAuto: (on) => { trackerAuto = !!on },
+    setLoginAuto: (on) => { loginAuto = !!on },
     dropSigninDir,
     setSigninDropRetryMs: (list) => { signinDropRetryMs = list || [6000, 30000] },
     openAsks: () => [...asks].map(([id, a]) => ({ id, spec: a.spec })),
