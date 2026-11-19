@@ -99,6 +99,16 @@ console.log('automatic compaction')
     !auto('room', [toolUse(870000), result, attachment]))
 }
 
+console.log('which account a chat ran on')
+{
+  const chat = { id: 'chat-1', project: ctx.projectKey('/work/site'), at: 5000 }
+  const liveLog = [{ at: 1000, name: 'live-one' }, { at: 9000, name: 'later' }]
+  check('otherwise, the account that was live when it last replied', ctx.accountOf(chat, { pins: {}, liveLog }) === 'live-one')
+  check('a folder pinned to an account owns its chats', ctx.accountOf(chat, { pins: { '/work/site': 'folder-acct' }, liveLog }) === 'folder-acct')
+  check('a pinned chat runs on its own account, over its folder\'s and whatever was live (the wrapper\'s order)',
+    ctx.accountOf(chat, { pins: { '/work/site': 'folder-acct' }, chatPins: [{ id: 'other', name: 'x' }, { id: 'chat-1', name: 'chat-acct' }], liveLog }) === 'chat-acct')
+}
+
 console.log('project folder names (L2)')
 {
   check('a short path: every non-alphanumeric character becomes "-"', ctx.projectKey('/Users/me/my app') === '-Users-me-my-app')

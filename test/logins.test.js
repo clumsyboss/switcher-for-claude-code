@@ -109,8 +109,9 @@ async function main() {
   dir = signInDir('w@example.com', login('W2', 29 * D))
   r = await logins.importPinning(ROOT, 'work', dir, OPTS)
   check('the right account is moved in', r.ok && r.expiresAt === NOW + 29 * D, JSON.stringify(r))
-  check('into <dir>/.credentials.json, where Claude Code looks with CLAUDE_SECURESTORAGE_CONFIG_DIR',
-    JSON.parse(fs.readFileSync(path.join(pinDir('work'), '.credentials.json'), 'utf8')).claudeAiOauth.refreshToken === 'RT-W2')
+  check('into the pinning folder\'s login, where Claude Code looks with CLAUDE_SECURESTORAGE_CONFIG_DIR',
+    rt(credstore.read(pinDir('work'), OPTS)) === 'RT-W2' &&
+    credstore.stat(pinDir('work'), OPTS).where === (process.platform === 'darwin' ? 'keychain' : 'file'))
   check('moved, not copied: the sign-in folder no longer has it', !credstore.exists(dir, OPTS))
   let meta = logins.readMeta(ROOT, 'work')
   check('meta: v1 with account, org, plan, sign-in and end', meta.v === 1 && meta.accountUuid === 'uuid-w@example.com' &&
@@ -388,14 +389,15 @@ async function main() {
   console.log('\n-- the background renewals never touch a pinning login --')
   saveAccount('work', 'w@example.com', { claudeAiOauth: { ...login('WR', 20 * D).claudeAiOauth, expiresAt: NOW - H } })
   credstore.write(pinDir('work'), { claudeAiOauth: { ...login('WP', 25 * D).claudeAiOauth, expiresAt: NOW - H } }, OPTS)
-  const before = fs.readFileSync(path.join(pinDir('work'), '.credentials.json'), 'utf8')
+  const pinnedNow = () => JSON.stringify(credstore.read(pinDir('work'), OPTS))
+  const before = pinnedNow()
   const sent = []
   tracker._test.transport.refresh = async (token) => { sent.push(token); return { status: 400, body: '{"error":"invalid_grant"}' } }
   tracker._test.transport.fetchUsage = async () => ({ ok: false, reason: 'offline' })
   await tracker.tick(ROOT, OPTS)
   check('the saved main login is what gets renewed', sent.includes('RT-WR'), JSON.stringify(sent))
   check('no pinning login is ever sent', !sent.some((t) => ['RT-WP', 'RT-MW', 'RT-H2b'].includes(t)))
-  check('the pinning login is byte for byte the same', fs.readFileSync(path.join(pinDir('work'), '.credentials.json'), 'utf8') === before)
+  check('the pinning login is byte for byte the same', pinnedNow() === before)
   check('pinning logins aren\'t saved accounts to it', !profiles.list(ROOT).some((p) => p.name === 'inuse' || p.name.endsWith('.json')))
 
   console.log('\n-- a crash in the middle of an exchange, then recover() --')

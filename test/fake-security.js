@@ -21,7 +21,15 @@ const items = {
   has(k) { return this.load().has(k) },
   get(k) { return this.load().get(k) },
   set(k, v) { const m = this.load(); m.set(k, v); this.save(m) },
-  delete(k) { const m = this.load(); const had = m.delete(k); this.save(m); return had },
+  delete(k) { const m = this.load(); const had = m.delete(k); m.delete(k + MDAT); this.save(m); return had },
+}
+const MDAT = '\0mdat'
+
+function stamp(ms) {
+  const d = new Date(ms)
+  const p = (n, w) => String(n).padStart(w || 2, '0')
+  return p(d.getUTCFullYear(), 4) + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) +
+    p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + 'Z'
 }
 const NOT_FOUND = 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n'
 
@@ -41,14 +49,24 @@ function exec(args) {
   if (cmd === 'find-generic-password') {
     if (!items.has(key)) return { status: 44, stdout: '', stderr: NOT_FOUND }
     if (args.includes('-w')) return { status: 0, stdout: items.get(key) + '\n', stderr: '' }
-    return { status: 0, stdout: 'class: "genp"\nattributes:\n', stderr: '' }
+    const t = stamp(Number(items.get(key + MDAT)) || Date.now())
+    return {
+      status: 0,
+      stdout: 'keychain: "/Users/someone/Library/Keychains/login.keychain-db"\nclass: "genp"\nattributes:\n' +
+        '    "mdat"<timedate>=0x' + Buffer.from(t).toString('hex').toUpperCase() + '00  "' + t + '\\000"\n' +
+        '    "svce"<blob>="' + opt(args, '-s') + '"\n',
+      stderr: '',
+    }
   }
   if (cmd === 'add-generic-password') {
     if (items.has(key) && !args.includes('-U')) {
       return { status: 45, stdout: '', stderr: 'security: SecKeychainItemCreateFromContent: The specified item already exists in the keychain.\n' }
     }
     const hex = opt(args, '-X')
-    items.set(key, hex !== undefined ? Buffer.from(hex, 'hex').toString('utf8') : opt(args, '-w'))
+    const m = items.load()
+    m.set(key, hex !== undefined ? Buffer.from(hex, 'hex').toString('utf8') : opt(args, '-w'))
+    m.set(key + MDAT, String(Math.floor(Date.now() / 1000) * 1000))
+    items.save(m)
     return { status: 0, stdout: '', stderr: '' }
   }
   if (cmd === 'delete-generic-password') {

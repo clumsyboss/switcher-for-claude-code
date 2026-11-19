@@ -384,6 +384,27 @@ function main() {
     }
   }
 
+  console.log('\n-- login end dates for accounts saved before they were kept beside them --')
+  {
+    const secrets = require('../lib/secrets.js')
+    const R3 = path.join(TMP, 'root3')
+    fs.mkdirSync(profiles.profilesDir(R3), { recursive: true })
+    const END = Date.now() + 20 * 86400e3
+    const save = (name, oauth) => {
+      fs.writeFileSync(path.join(profiles.profilesDir(R3), name + '.enc'), secrets.protect(Buffer.from(JSON.stringify({
+        credentials: { claudeAiOauth: oauth }, identity: { oauthAccount: { emailAddress: name + '@example.com', accountUuid: 'uuid-' + name } },
+        capturedAt: new Date().toISOString() }))))
+      profiles.writeMeta(R3, name, { email: name + '@example.com', accountUuid: 'uuid-' + name })
+    }
+    save('dated', { accessToken: 'AT-1', refreshToken: 'RT-1', refreshTokenExpiresAt: END })
+    save('undated', { accessToken: 'AT-2', refreshToken: 'RT-2' })
+    const filled = profiles.fillLoginExpiry(R3)
+    check('an account whose saved login has an end date gets it beside it', profiles.readMeta(R3, 'dated').loginExpiresAt === END &&
+      JSON.stringify(filled) === '["dated"]', JSON.stringify(filled))
+    check('one whose saved login doesn\'t say is left as it was', !('loginExpiresAt' in profiles.readMeta(R3, 'undated')))
+    check('and the next start changes nothing', profiles.fillLoginExpiry(R3).length === 0)
+  }
+
   console.log('\n===== ' + pass + ' passed, ' + fail + ' failed =====')
   fs.rmSync(TMP, { recursive: true, force: true })
   process.exit(fail ? 1 : 0)

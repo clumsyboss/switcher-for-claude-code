@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1
+
+- **Keep alive works again,** and so do **▶** (start a 5-hour session) and auto-continue's note to a chat. Current Claude Code waits for typed input when it's started in the background, so each of these runs failed with a "no stdin data received" warning. They now tell Claude Code at once that no input is coming, and that warning is never reported as the error.
+- **Accounts saved by 1.3 show their days left.** Their login's end date is read from their own saved login at startup, so their card gets its days-left line.
+- **macOS:** a `/login` in Claude Code is noticed even when the Keychain doesn't say when the login changed.
+- **A pinned chat that stops at its account's limit stays on that account.** Auto-continue saw only pinned folders, so a pinned chat at its limit could switch your active account for nothing, since the chat stays on its own account. Now it never switches the active account for it, and waits for that account's own reset ("It will continue … at 5:40 PM"). Moving a pinned chat to an account with room is planned for 1.5.
+- **A pinned chat waiting to move** shows "Moves to … when this reply finishes" on a strip of its own under the chat's title, with **Reopen now** right after the words. In a narrow sidebar it no longer squeezes into a column beside the buttons.
+- **For contributors:** the tests pass on a real Mac and on GitHub's Windows and macOS machines. They no longer depend on how fast the machine runs.
+
 ## 1.4.0
 
 - **Sign in on the page.** **Add account** and **Sign in again** no longer open a terminal. The page shows the browser sign-in with a link, a copy button and a **Paste code** box, and **Cancel** stops it. A new account asks for a name (optional), colour and icon first, and the name can come from the email. Signing in as an account that's already saved renews it and says how many days it now has.

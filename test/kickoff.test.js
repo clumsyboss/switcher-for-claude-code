@@ -103,6 +103,25 @@ async function main() {
   res = await kickoff.startSession(ROOT, 'work', { run: async () => { ran = true; return { ok: true } } })
   check('an account whose login expired is refused without running', res.ok === false && !ran && /sign it in again/.test(res.reason))
 
+  if (process.platform !== 'win32') {
+    console.log('\n-- the real run gives claude nothing to wait for on stdin --')
+    const claudeLib = require('../lib/claude.js')
+    const standIn = path.join(ROOT, 'claude-standin.js')
+    fs.writeFileSync(standIn, "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();" +
+      "setTimeout(() => { process.stderr.write('Warning: no stdin data received in 3s, proceeding without it.\\nError: it never got going\\n'); process.exit(1) }, 1500)")
+    const bin = path.join(ROOT, 'claude-standin')
+    fs.writeFileSync(bin, '#!/bin/sh\nexec ' + JSON.stringify(process.execPath) + ' ' + JSON.stringify(standIn) + ' "$@"\n', { mode: 0o755 })
+    const realResolve = claudeLib.resolveBin
+    claudeLib.resolveBin = () => bin
+    try {
+      const t0 = Date.now()
+      const ran = await kickoff.runCli(ROOT)
+      check('stdin is closed at once, so claude doesn\'t wait for it', ran.ok === true && Date.now() - t0 < 1400, JSON.stringify(ran))
+    } finally { claudeLib.resolveBin = realResolve }
+    check('and the stdin warning is never taken for the error', claudeLib.errorLine('Warning: no stdin data received in 3s, proceeding without it.\nError: it never got going\n') === 'Error: it never got going' &&
+      claudeLib.errorLine('Warning: no stdin data received in 3s') === null)
+  }
+
   console.log('\n-- after a reload or crash --')
   fs.mkdirSync(path.join(kickoff.kickoffRoot(ROOT), 'work-left'), { recursive: true })
   fs.writeFileSync(path.join(kickoff.kickoffRoot(ROOT), 'work-left', '.credentials.json'), '{}')

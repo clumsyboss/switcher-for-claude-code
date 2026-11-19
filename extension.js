@@ -353,7 +353,7 @@ function contextTooltip(cur, chats) {
 
 function contextByAccount() {
   if (!editionLib.hasFeature(edition, 'context')) return {}
-  const ctx = { pins: store.getPins(root()), liveLog: store.getLiveLog(root()) }
+  const ctx = { pins: store.getPins(root()), chatPins: chatPins.read(root()), liveLog: store.getLiveLog(root()) }
   const out = {}
   for (const c of contextCache.chats) {
     const name = contextLib.accountOf(c, ctx)
@@ -581,6 +581,8 @@ function chatIsHere(chat) {
 }
 
 function chatPin(chat) {
+  const own = chatPins.read(root()).find((p) => p.id === chat.id)
+  if (own) return own.name
   for (const [folder, name] of Object.entries(store.getPins(root()))) {
     if (contextLib.folderKeys(folder).some((k) => sameProject(k, chat.project))) return name
   }
@@ -629,7 +631,7 @@ async function checkLimits() {
 }
 
 function handleStop(chat, stop, info, settings) {
-  const account = contextLib.accountOf(chat, { pins: store.getPins(root()), liveLog: store.getLiveLog(root()) })
+  const account = contextLib.accountOf(chat, { pins: store.getPins(root()), chatPins: chatPins.read(root()), liveLog: store.getLiveLog(root()) })
   const rows = snapshotRows()
   const pinned = chatPin(chat)
   const resetAt = autoLib.resetFor(stop, rows.find((r) => r.name === (pinned || account)))
@@ -661,7 +663,7 @@ function askAbout(entry, to, canWait) {
   const SWITCH = to ? 'Switch to ' + labelOf(to) + ' and Continue' : null
   const WAIT = canWait ? 'Continue at ' + clockText(entry.resetAt) : null
   const what = '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + (entry.account ? ' on ' + labelOf(entry.account) : '') +
-    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? ' Its folder is pinned, so it stays on that account.' : '')
+    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? ' It\'s pinned to ' + labelOf(entry.account) + ', so it stays on that account.' : '')
   notify('info', what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
     if (pick && pick === SWITCH) switchAndContinue(entry, to)
     else if (pick && pick === WAIT) waitForReset(entry, 'It')
@@ -919,6 +921,8 @@ async function refreshLiveQuietly() {
   }
   updateUsageBar()
 }
+
+let trackerAuto = true
 
 async function trackerTick(opts) {
   if (trackerRunning || !trackingEnabled()) return
@@ -2105,6 +2109,7 @@ const oauthRt = (c) => (c && c.claudeAiOauth && c.claudeAiOauth.refreshToken) ||
 function loginStoreChanged(key, dir) {
   let st = null
   try { st = credstore.stat(dir) } catch { return false }
+  if (st && st.exists && st.modifiedMs == null) { loginStamps.delete(key); return true }
   const ms = st && st.exists ? (st.modifiedMs || 0) : -1
   if (loginStamps.get(key) === ms) return false
   loginStamps.set(key, ms)
@@ -3692,6 +3697,10 @@ function activate(context) {
   const privacyTimer = setTimeout(() => { offerPrivateFiles(context, false).catch(() => {}) }, 5000)
   if (privacyTimer.unref) privacyTimer.unref()
   context.subscriptions.push({ dispose: () => clearTimeout(privacyTimer) })
+  try {
+    const filled = profilesLib.fillLoginExpiry(root())
+    if (filled.length) log('login end dates read from the saved logins of: ' + filled.join(', '))
+  } catch (e) { log('login end dates: ' + (e && e.message)) }
   const recovered = syncStagedLogins()
   if (recovered.length) {
     notify('info', 'Added to the account switcher: ' + recovered.join(', ') + '.')
@@ -3750,8 +3759,8 @@ function activate(context) {
 
   const welcomeTimer = setTimeout(() => { offerWelcome().catch((e) => log('welcome: ' + (e && e.message))) }, 4000)
   context.subscriptions.push({ dispose: () => clearTimeout(welcomeTimer) })
-  const firstTick = setTimeout(trackerTick, 20000)
-  const trackerTimer = setInterval(trackerTick, 5 * 60 * 1000)
+  const firstTick = trackerAuto ? setTimeout(trackerTick, 20000) : null
+  const trackerTimer = trackerAuto ? setInterval(trackerTick, 5 * 60 * 1000) : null
   context.subscriptions.push({ dispose: () => { clearTimeout(firstTick); clearInterval(trackerTimer) } })
   context.subscriptions.push({ dispose: () => { if (panel) panel.dispose(); panel = null; view = null } })
 
@@ -3776,6 +3785,7 @@ module.exports = {
     setAsker: (fn) => { asker = fn || askViaPage },
     setSigninStart: (fn) => { signinStart = fn || ((o) => signinLib.start(o)) },
     uiAsk: (spec) => ui.ask(spec),
+    setTrackerAuto: (on) => { trackerAuto = !!on },
     dropSigninDir,
     setSigninDropRetryMs: (list) => { signinDropRetryMs = list || [6000, 30000] },
     openAsks: () => [...asks].map(([id, a]) => ({ id, spec: a.spec })),

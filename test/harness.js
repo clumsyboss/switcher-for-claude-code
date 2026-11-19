@@ -218,6 +218,7 @@ function check(label, cond, extra) {
   else { fail++; console.log('  FAIL  ' + label + (extra ? '  <- ' + extra : '')) }
 }
 const tick = () => new Promise((r) => setTimeout(r, 30))
+const nextKeychainSecond = () => { if (process.platform === 'darwin') require('../lib/fsx').sleepSync(1005 - (Date.now() % 1000)) }
 const cmdOf = (t) => (t && t.opts && Array.isArray(t.opts.shellArgs) ? t.opts.shellArgs.join(' ') : '')
 const iso = (ms) => new Date(Date.now() + ms).toISOString()
 
@@ -258,6 +259,7 @@ async function main() {
   const mainState = new Map()
   const ctx = { subscriptions: [], globalState: { get: (k) => mainState.get(k), update: async (k, v) => { mainState.set(k, v) } } }
   q.warn.push('Clear It')
+  ext._test.setTrackerAuto(false)
   ext.activate(ctx)
   await tick()
   check('root directory created', fs.existsSync(TEST_ROOT))
@@ -941,6 +943,30 @@ async function main() {
   check('and a second stop record in the same chat is the same episode, not a new one', stateOf('stop-t2') === undefined)
   await ext._test.onPageMessage({ type: 'switch', name: prevLive })
 
+  chatPinsLib.set(TEST_ROOT, LSID, 'dana', 'Fix the tests')
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'room', order: [] })
+  liveSession('idle')
+  writeChat(startOf().concat([stopRec('stop-p', Date.now() + 2 * 3600e3)]))
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  const liveBeforeP = profiles.activeProfile(TEST_ROOT)
+  await ext._test.checkLimits()
+  const stopP = autoLib.readState(TEST_ROOT).stops['stop-p'] || {}
+  check('a pinned chat at its limit never switches the active account: it waits for its own account\'s reset',
+    profiles.activeProfile(TEST_ROOT) === liveBeforeP && stopP.state === 'waiting' && stopP.pinned === true && stopP.account === 'dana' && !stopP.to,
+    JSON.stringify(stopP))
+  store.setAutoContinue(TEST_ROOT, { mode: 'ask', pick: 'room', order: [] })
+  writeChat(startOf().concat([stopRec('stop-q', Date.now() + 2 * 3600e3)]))
+  ext._test.refreshContext()
+  const askedP = messages.length
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  await settleNotes()
+  check('asked, it says the chat is pinned to its account and stays there', messages.slice(askedP).some((m) =>
+    m.includes('"Fix the tests" stopped at its 5-hour limit on ') && /It's pinned to .+, so it stays on that account\./.test(m)), messages.slice(askedP).join(' || '))
+  chatPinsLib.remove(TEST_ROOT, LSID)
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+
   console.log('\n-- switching early, before the limit stops anything --')
   const inHours = (h) => new Date(Date.now() + h * 3600e3).toISOString()
   const liveUsage = (session, weekly) => usageLib.writeLiveCache(TEST_ROOT, null, { limits: [
@@ -1139,7 +1165,7 @@ async function main() {
   const wrapperList = () => { try { return fs.readFileSync(chatPinsLib.wrapperFile(TEST_ROOT), 'utf8') } catch { return '' } }
   const pinnedFolderLine = (folder, name) => wrapperList().split('\n').some((l) => {
     const [kind, f, n] = l.split('\t')
-    return kind === 'folder' && n === name && chatPinsLib.samePath(f, folder)
+    return kind === 'folder' && n === name && chatPinsLib.samePath(f, store.pinKey(folder))
   })
 
   store.setPin(TEST_ROOT, PIN_FOLDER, 'dana')
@@ -1833,6 +1859,7 @@ async function main() {
     const activeBefore = profiles.activeProfile(TEST_ROOT)
     const DANA_PIN = loginsLib.dirFor(TEST_ROOT, 'dana')
     const chatLogin = (dir, email, uuid, rt, days) => {
+      nextKeychainSecond()
       credstore.write(dir, { claudeAiOauth: { accessToken: 'AT-' + rt, refreshToken: rt, expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: Date.now() + days * DAY } })
       const cfg = readJson(LIVE_CFG)
       cfg.oauthAccount = { emailAddress: email, accountUuid: uuid, organizationName: 'Acme' }
@@ -1987,6 +2014,7 @@ async function main() {
     await ext._test.loginChangeTick()
 
     before = messages.length
+    nextKeychainSecond()
     credstore.write(DANA_PIN, { claudeAiOauth: { accessToken: 'AT-DP5', refreshToken: 'RT-DP5', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: Date.now() + 44.5 * DAY } })
     const old = new Date(Date.now() - 60000)
     fs.utimesSync(LIVE_CFG, old, old)

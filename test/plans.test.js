@@ -1,3 +1,4 @@
+require('./fake-security')
 const profiles = require('../lib/profiles.js')
 const usage = require('../lib/usage.js')
 

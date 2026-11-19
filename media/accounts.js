@@ -809,8 +809,10 @@
       steps, acEditing ? sentence : null, waiting, how)
   }
 
-  function waitLine(c) {
-    return h('span', { class: 'who wait' }, icon('clock', 'sm'), h('span', { text: 'Moves to ' + c.label + ' when this reply finishes' }))
+  function waitStrip(c, key) {
+    return h('div', { class: 'wait-strip' }, icon('clock', 'sm'),
+      h('span', { class: 'wait-text', text: 'Moves to ' + c.label + ' when this reply finishes' }),
+      h('button', { class: 'btn soft sm', 'data-fk': key, onclick: () => reopenNowDialog(c) }, 'Reopen now'))
   }
 
   function pinsSection() {
@@ -829,15 +831,15 @@
     for (const c of s.chatPins || []) {
       const a = accounts.find((x) => x.name === c.name) || { name: c.name, label: c.label, icon: null }
       const title = c.title || 'Untitled chat'
-      rows.push(h('div', { class: 'pin-row chat' },
+      rows.push(h('div', { class: 'pin-row chat' + (c.waiting ? ' waiting' : '') },
         avatar(a, 'avatar'),
         h('div', { class: 'grow' },
           h('span', { class: 'path ltr', title, text: title }),
-          c.waiting ? waitLine(c)
+          c.waiting ? null
             : h('span', { class: 'who' }, icon('chat', 'sm'), h('span', { text: c.label + ' · chat' + (c.ready === false ? ' · needs a pinning login' : '') }))),
-        c.waiting ? h('button', { class: 'btn soft sm', 'data-fk': 'reopen:' + c.id, onclick: () => reopenNowDialog(c) }, 'Reopen now') : null,
         h('button', { class: 'btn soft-danger sm', 'aria-label': 'Unpin the chat ' + title, 'data-fk': 'unpin:' + c.id,
-          onclick: () => send('unpinChat', { id: c.id }) }, 'Unpin')))
+          onclick: () => send('unpinChat', { id: c.id }) }, 'Unpin'),
+        c.waiting ? waitStrip(c, 'reopen:' + c.id) : null))
     }
     return h('section', { class: 'pins' },
       h('div', { class: 'section-head' },
@@ -1391,11 +1393,11 @@
           return h('div', { class: 'pp-row' + (c.waiting ? ' waiting' : '') },
             h('span', { class: 'pp-kind', 'aria-hidden': 'true' }, icon('chat', 'sm')),
             h('div', { class: 'grow' }, h('span', { class: 't', title, text: title }),
-              c.waiting ? waitLine(c) : h('span', { class: 's', text: 'Chat' + (c.ready === false ? ' · needs a pinning login' : '') })),
+              c.waiting ? null : h('span', { class: 's', text: 'Chat' + (c.ready === false ? ' · needs a pinning login' : '') })),
             h('div', { class: 'row-btns' },
-              c.waiting ? h('button', { class: 'btn soft sm', 'data-fk': 'pp:reopen:' + c.id, onclick: () => reopenNowDialog(c) }, 'Reopen now')
-                : moveBtn({ id: c.id }, title, 'pp:move:' + c.id),
-              unpinBtn(() => send('unpinChat', { id: c.id }), title, 'pp:unpin:' + c.id)))
+              c.waiting ? null : moveBtn({ id: c.id }, title, 'pp:move:' + c.id),
+              unpinBtn(() => send('unpinChat', { id: c.id }), title, 'pp:unpin:' + c.id)),
+            c.waiting ? waitStrip(c, 'pp:reopen:' + c.id) : null)
         }),
         ...folders.map((p) => h('div', { class: 'pp-row' },
           h('span', { class: 'pp-kind', 'aria-hidden': 'true' }, icon('folder', 'sm')),
