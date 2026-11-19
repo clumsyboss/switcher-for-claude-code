@@ -13,7 +13,7 @@ function check(name, ok) {
   if (ok) { pass++; console.log('  PASS  ' + name) } else { fail++; console.log('  FAIL  ' + name) }
 }
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chatpins-'))
+const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'chatpins-')))
 const root = path.join(tmp, 'root')
 fs.mkdirSync(root)
 const ID = '6b8cbf67-1111-4222-8333-944455556666'
