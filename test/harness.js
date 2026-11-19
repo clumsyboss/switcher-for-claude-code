@@ -218,7 +218,7 @@ function check(label, cond, extra) {
   else { fail++; console.log('  FAIL  ' + label + (extra ? '  <- ' + extra : '')) }
 }
 const tick = () => new Promise((r) => setTimeout(r, 30))
-const nextKeychainSecond = () => { if (process.platform === 'darwin') require('../lib/fsx').sleepSync(1005 - (Date.now() % 1000)) }
+const nextKeychainSecond = () => { require('../lib/fsx').sleepSync(process.platform === 'darwin' ? 1005 - (Date.now() % 1000) : 20) }
 const cmdOf = (t) => (t && t.opts && Array.isArray(t.opts.shellArgs) ? t.opts.shellArgs.join(' ') : '')
 const iso = (ms) => new Date(Date.now() + ms).toISOString()
 
