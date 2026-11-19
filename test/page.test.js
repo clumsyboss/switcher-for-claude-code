@@ -87,16 +87,16 @@ check('no strokes on anything — only the live account has one', strokes.length
   strokes.map((b) => b.sel + ' ' + b.prop + ': ' + b.val).join(' | '))
 check('outside high contrast, that outline is invisible', /--hc-border: transparent;/.test(css) &&
   /body\.vscode-high-contrast[\s\S]{0,80}--hc-border: var\(--vscode-contrastBorder\)/.test(css))
-check('boxes have 8px corners, buttons 4px', /--radius: 8px;/.test(css) && /--radius-sm: 4px;/.test(css))
+check('boxes have 16px corners, buttons 8px', /--radius: 16px;/.test(css) && /--radius-sm: 8px;/.test(css))
 const ruleFor = (sel) => (rules.find(([s]) => s === sel) || [])[1] || ''
-check('pinned folders: 4px rows, 8px on the top of the first and the bottom of the last',
+check('pinned folders: 8px rows, 16px on the top of the first and the bottom of the last',
   /border-radius: var\(--radius-sm\)/.test(ruleFor('.pin-row')) &&
   /border-top-left-radius: var\(--radius\);\s*border-top-right-radius: var\(--radius\)/.test(ruleFor('.pin-row:first-child')) &&
   /border-bottom-left-radius: var\(--radius\);\s*border-bottom-right-radius: var\(--radius\)/.test(ruleFor('.pin-row:last-child')))
 check('cards and buttons use those radii', /var\(--radius\)/.test(ruleFor('.card')) && /var\(--radius-sm\)/.test(ruleFor('.btn')))
 check('Update usage and Pin a folder are ghost buttons',
   /class: 'btn ghost'[^\n]*send\('update'/.test(js) && /class: 'btn ghost sm', onclick: \(\) => send\('pin'\) }, icon\('pin'/.test(js))
-check('no status pills on the cards', !/badge/.test(js) && !/Most room|'Live'|In use/.test(js))
+check('no status pills on the cards (the plan badge is the only pill)', !/Most room|'Live'|In use/.test(js) && /class: 'plan-badge'/.test(js))
 check('menus live in a layer of their own, above every card', /document\.body\.append\(layer\)/.test(js) &&
   /\.menu-layer \{ position: fixed;[^}]*z-index: 40/.test(css))
 check('menus are built with h(), which skips empty items, never with a bare append (that printed "null")',
@@ -124,6 +124,51 @@ check('a narrow card shortens Remote Control and shows the Switch icon alone, ke
   /@container card \(max-width: 340px\)[^}]*\.has-short \.long \{ display: none; \}[\s\S]*?\.btn-text \{ display: none; \}/.test(css) &&
   /toggle\('Remote Control', 'Remote'/.test(js) && /'aria-label': \(switching \? 'Switching to ' : 'Switch to '\) \+ a\.label/.test(js))
 check('a label without a short form is never hidden', !/\.toggle \.tl \.long \{ display: none/.test(css))
+check('the head\'s Pin buttons narrow in two steps: "Pin chat" to "Chat", then "Beta" to "B"',
+  /\.accounts > \.section-head \{ container: accounts-head \/ inline-size; \}/.test(css) &&
+  /@container accounts-head \(max-width: 366px\) \{\s*\.head-buttons \.btn > \.hb-long \{ display: none; \}\s*\.head-buttons \.btn > \.hb-short \{ display: inline; \}/.test(css) &&
+  /@container accounts-head \(max-width: 329px\) \{\s*\.head-buttons \.beta > \.hb-long \{ display: none; \}\s*\.head-buttons \.beta > \.hb-short \{ display: inline; \}/.test(css) &&
+  /\.head-buttons \.hb-short \{ display: none; \}/.test(css))
+check('and keep their whole names for screen readers', /'aria-label': long \+ ' \(Beta\)'/.test(js) && /headPinButton\('pinFolder'/.test(js))
+
+console.log('\n-- the compact view --')
+check('a button left of Pin chat, as tall as the Pin buttons, with aria-pressed',
+  /h\('div', \{ class: 'head-buttons' \},\s*compactButton\(\),\s*headPinButton\('pinChat'/.test(js) &&
+  /return h\('button', \{ class: 'btn tint sm', 'data-fk': key/.test(js) &&
+  /class: 'btn ghost sm icon-only cv-toggle'/.test(js) && /btn\.setAttribute\('aria-pressed', String\(on\)\)/.test(js))
+check('its tooltip says what pressing it does, with the matching drawing; its name stays "Compact view" (pressed when on)',
+  /const what = on \? 'Expanded view' : 'Compact view'/.test(js) && /btn\.title = what/.test(js) &&
+  /btn\.setAttribute\('aria-label', 'Compact view'\)/.test(js) && !/setAttribute\('aria-label', what\)/.test(js) &&
+  /icon\(on \? 'unfold' : 'fold', 'sm'\)/.test(js) &&
+  /\n    fold: '<path/.test(js) && /\n    unfold: '<path/.test(js))
+check('off by default, and saved as a page setting', /askSecondLogin: true, compact: false \}/.test(js) &&
+  /send\('setting', \{ key: 'compact', value: on \}\)/.test(js))
+check('reduced motion (the system\'s or VS Code\'s) changes the view at once',
+  /matchMedia\('\(prefers-reduced-motion: reduce\)'\)\.matches/.test(js) && /vscode-reduce-motion/.test(js) &&
+  /if \(!reducedMotion\(\)\) \{ cvStart\(on\); return \}/.test(js))
+check('a redraw waits for the change, and otherwise shows the saved view without animating',
+  /if \(cvAnim\) \{ cvPending = true; return \}\n    docEl\.classList\.toggle\('compact-view', compactWanted\(\)\)/.test(js))
+const cvTime = Number((js.match(/const CV_TIME = (\d+)/) || [])[1])
+check('the change lasts 300-350ms: contents out over 100ms, in over 200ms',
+  /const CV_OUT = 100\n/.test(js) && /const CV_IN = 200\n/.test(js) && cvTime >= 300 && cvTime <= 350, cvTime)
+check('compact keeps text the same size (the font rule moves by the room the padding gives back: 13px, 12px in the sidebar)',
+  /html\.compact-view \.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 233px\) \/ 50\), var\(--fs-max\)\); \}/.test(css) &&
+  /html\.compact-view body\.layout-sidebar \.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 232px\) \/ 50\), var\(--fs-max\)\); \}/.test(css) &&
+  2 * (px(ruleFor('.card'), 'padding') - px(ruleFor('html.compact-view .card'), 'padding')) === 13 &&
+  2 * (px(ruleFor('body.layout-sidebar .card'), 'padding') - px(ruleFor('html.compact-view body.layout-sidebar .card'), 'padding')) === 12)
+check('rows keep equal room on every side', /html\.compact-view \{ --cvo: 1; --row-pad: 4\.5px; \}/.test(css) &&
+  /html\.compact-view \.ac-steps \{ padding: var\(--row-pad\); \}/.test(css))
+check('compact: one line at the top (the picture is the pin button\'s 28px, no email line), and the email in the name\'s tooltip',
+  /html\.compact-view \.card-head \.avatar, html\.compact-view body\.layout-sidebar \.card-head \.avatar \{ width: 28px; height: 28px; \}/.test(css) &&
+  /html\.compact-view \.card-head \.ident \.sub \{ display: none; \}/.test(css) &&
+  /h\('div', \{ class: 'name', text: a\.label, 'data-who': who \|\| null, title: \[who, days\]/.test(js) &&
+  /nm\.title = \[nm\.dataset\.who \|\| '', days \|\| ''\]/.test(js))
+check('compact: label, bar and reset line half as far apart, the same either side of the bar; the toggles closer',
+  /html\.compact-view \.track \{ margin: -0\.9px 0 -0\.1px; \}/.test(css) && /html\.compact-view body\.layout-sidebar \.track \{ margin: -0\.5px 0 -0\.5px; \}/.test(css) &&
+  /html\.compact-view \.card \.meters:has\(\+ \.card-foot\) \{ margin-bottom: -4px; \}/.test(css))
+check('a narrow card keeps its Switch button on the toggles\' line (the footer\'s rules outweigh the sidebar\'s)',
+  /@container card \(max-width: 300px\) \{\s*\.card-foot, html body\.layout-sidebar \.card-foot \{ column-gap: 8px; \}/.test(css) &&
+  /\.card-foot, html body\.layout-sidebar \.card-foot \{ gap: 6px 8px; \}/.test(css))
 
 console.log('\n-- colours and avatars --')
 const clientColors = Object.keys(eval('(' + (js.match(/const COLORS = (\{[\s\S]*?\n  \})/) || [])[1] + ')'))
@@ -153,7 +198,7 @@ check('no em dashes in anything a user reads', dashes.length === 0, dashes.join(
 
 console.log('\n-- icons --')
 const media = (f) => fs.readFileSync(path.join(__dirname, '..', 'media', f), 'utf8')
-const stroke = (svg) => (svg.match(/stroke="(#[0-9a-fA-F]{3,6})"/) || [])[1]
+const stroke = (svg) => (svg.match(/(?:stroke|fill)="(#[0-9a-fA-F]{3,6})"/) || [])[1]
 const lum = (hex) => { const v = hex.length === 4 ? hex.slice(1).split('').map((c) => c + c) : hex.slice(1).match(/../g)
   return v.map((x) => parseInt(x, 16)).reduce((a, b) => a + b, 0) / 3 }
 const light = media('tab-light.svg'), dark = media('tab-dark.svg'), bar = media('activity.svg')

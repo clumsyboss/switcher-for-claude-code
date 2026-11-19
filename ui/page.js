@@ -40,7 +40,8 @@ function render(o) {
     '<script nonce="' + n + '">window.__ICONS__=' + JSON.stringify(ICONS) +
       ';window.__ICON_NAMES__=' + JSON.stringify(ICON_NAMES) +
       ';window.__HAS_FONT__=' + (o.fontUri ? 'true' : 'false') +
-      ';window.__LAYOUT__=' + JSON.stringify(layout) + ';</script>\n' +
+      ';window.__LAYOUT__=' + JSON.stringify(layout) +
+      ';window.__LOGO__=' + JSON.stringify(o.logoUri || null) + ';</script>\n' +
     '<script nonce="' + n + '" src="' + attr(o.jsUri) + '"></script>\n' +
     '</body>\n</html>\n'
 }

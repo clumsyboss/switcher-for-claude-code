@@ -1,0 +1,30 @@
+name: Publish
+# When a release is published on the public repo, send its attached .vsix to the
+# VS Code Marketplace. Signing in uses the Marketplace's Trusted Publishing
+# policy for this repo and this file, so there is no token or secret.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, such as v1.3.2
+        required: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    if: github.repository == 'clumsyboss/switcher-for-claude-code'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download the release's .vsix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.vsix' --dir dist
+      - name: Publish to the Marketplace
+        run: npx --yes @vscode/vsce@latest publish --oidc --packagePath dist/*.vsix

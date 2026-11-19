@@ -1,14 +1,67 @@
-# Switcher for Claude Code
+# Switcher for Claude Code [Unofficial]
 
-Switch between your Claude accounts in VS Code without going through the
-browser login every time. See every account's 5-hour and weekly limits at a
-glance, and pin a folder to its own account.
+**A Claude Code account switcher for VS Code.** Use multiple Claude accounts
+(Pro, Max, Ultra, Team) and switch between them in one click, without going
+through the browser login every time. See every account's 5-hour and weekly
+usage limits at a glance, keep chats going automatically when one account hits
+its limit, and pin a folder or a single chat to its own account.
+
+## What's new
+
+- **Sign in on the page.** **Add account** and **Sign in again** no longer open
+  a terminal. The page walks you through the browser sign-in, with a
+  **Paste code** box if the browser can't hand it back.
+- **Pinning logins (Beta).** An account can have a second login of its own for
+  pinned chats and folders, so they never sign out your other chats. It
+  replaces pin keys.
+- **Days left on every login.** A thin line round each card, and the status bar
+  after the usage figures, such as `16d · pin 23d`. Reminders come 3 days before
+  one ends and on its last day, and the switcher swaps main and pinning logins quietly
+  on the last day when it's safe.
+- **Pin a chat** to its own account, and **pin a folder without a reload**.
+- **A compact view** of the Accounts page, from the button left of **Pin chat**.
+- **Check everything** in the ⚙ menu, and a short checklist on a fresh install.
+- **A new Accounts page,** with a welcome and a one-minute tour. The account you
+  are using is the **active account**, with a soft blue glow.
+- **A heads-up before changing organization,** since chats there can't reuse
+  Claude's earlier thinking.
+- **Your plan on every card,** by Anthropic's names: Free, Pro, Max, Ultra or
+  Team (Team Max or Team Pro).
+- **Settings on the page:** choose what cards and the status bar show.
+
+Earlier versions: see the [Changelog](CHANGELOG.md).
+
+## Visuals
+
+**Add an account, switch in one click, and keep chats going at 80%:**
+
+![Adding an account, switching accounts with the organization heads-up, and setting auto-continue to switch at 80% of the limit](docs/visuals/walkthrough.gif)
+
+## Enjoying it?
+
+If Switcher for Claude Code saves you time, please
+[give it ★★★★★ on the Marketplace](https://marketplace.visualstudio.com/items?itemName=clumsyboss.account-switcher-claude-code&ssr=false#review-details).
+It's the best way to help other Claude Code users find it. Found a problem or
+have an idea? [Open an issue](https://github.com/clumsyboss/switcher-for-claude-code/issues).
+
+## Keep it up to date
+
+This is an active project, with new features arriving regularly: auto-continue
+after limits, Keep alive and plan detection all came in the last few weeks. Make
+sure **Auto Update** is on (Extensions view → Switcher for Claude Code → ⚙ →
+**Auto Update**), so you get each one as soon as it's out.
+
+## About this project
+
+*Unofficial: a community project, not made by or affiliated with Anthropic.
+Claude and Claude Code are Anthropic's trademarks.*
 
 Everything stays on your machine. No server, no telemetry, no account data
-leaves the laptop.
+leaves the machine.
 
 Works on **Windows, macOS and Linux**. Saved logins are encrypted at rest using
-whatever credential store the platform provides. See [Security](#security) for details.
+whatever credential store the platform provides. See
+[Where your data lives](#where-your-data-lives) for details.
 
 ---
 
@@ -36,29 +89,43 @@ Palette (`Ctrl+Shift+P`).
 1. **Save the account you already use.** The page says your current login isn't
    saved yet; click **Save it** and give it a short name. Nothing about your
    login changes; it is just recorded so you can come back to it.
-2. **Add your other accounts.** Click **Add account** → name it → a terminal
-   opens and a browser tab asks you to sign in.
+2. **Add your other accounts.** Click **Add account** → pick a name, colour
+   and icon (the name is optional) → **Finish signing in on the browser**. Your
+   browser opens and asks you to sign in.
    - Use a **private/incognito window** if your browser is already signed in to
      a different Claude account. Otherwise it will silently reuse that one, and
-     the extension will tell you it is a duplicate.
-   - Paste the code back into the terminal. The extension notices on its own and
-     adds the account for you. There's no button to click.
+     the page will tell you it is already saved.
+   - Nothing to paste in most cases: the page notices the sign-in and adds the
+     account. If your browser shows a code instead, copy it and use **Paste
+     code** on the page. There is no terminal.
+   - Then it offers **Add a second login?** for pinning chats and folders. Say
+     **No thank you** to skip it; see [Logins](#logins-main-and-pinning).
 3. **Switch.** Click **Switch** on an account's card, or click the account name
    in the status bar and pick one.
 
+On a fresh install the page also shows a short **Getting started** list that
+ticks itself off as you go: save the account you're using, add another account,
+and (optional, Beta) add a pinning login.
+
 ## The Accounts page
 
-One card per saved account: its email, its 5-hour and weekly use with when each
-resets, and everything you can do with it. The live account is the one with
-the green outline. An account with pinned folders shows a pin and a count next
-to its **⋯** menu; click it to see which folders. Behind the bottom of each
-card, a faint grid of squares fills up with the context of that account's most
-recent chat (see [Chat context](#chat-context)).
+One card per saved account: its email, its use with when each limit resets
+(**5h Session**, **Fable** and **Weekly**, as the plan has them), and
+everything you can do with it. The **active account**, the one new chats use,
+has a soft blue glow. Each card has a round blue **pin** button with a count of
+what's pinned to that account (starting from 1); click it to open the pin
+panel and see which chats and folders. Behind the bottom of each card, a faint
+grid of squares fills up with the context of that account's most recent chat
+(see [Chat context](#chat-context)).
+
+A thin line runs round each card to show how long its **main login** has left:
+grey until half its days are gone, then amber, then red as it runs out. Hover the card for the
+exact days (see [Logins](#logins-main-and-pinning)).
 
 | I want to… | On the page |
 |---|---|
 | Switch account | **Switch** on its card |
-| Add an account | **Add account** |
+| Add an account | **Add account** (the sign-in happens on the page) |
 | Refresh everyone's figures | **Update usage** |
 | Start an account's 5-hour window now, without switching to it | **▶** on its card |
 | Always start an account's next 5-hour window as soon as one ends | **⋯ → Keep alive** |
@@ -70,9 +137,21 @@ recent chat (see [Chat context](#chat-context)).
 | Turn Remote Control off for one account | The **Remote Control** switch on its card |
 | Stop one account from publishing Artifacts | The **Artifacts** switch on its card |
 | Sign in again after a login expires | **Sign in again** on the card (or **⋯ → Sign in again**) |
-| Remove an account from the switcher | **⋯ → Forget account** (your Claude account itself is untouched) |
-| Pin a folder to an account | **Pin a folder…** under Folder pins |
-| Unpin a folder | **Unpin** next to it |
+| Give an account a pinning login (Beta) | **⋯ → Add account for pinning** |
+| See or change what an account has pinned | The blue **pin** button on its card |
+| Test that everything works | **⚙ → Check everything** |
+| Remove an account from the switcher | **⋯ → Forget account** (its pinning login goes too, and its chats and folders are unpinned; your Claude account itself is untouched) |
+| Pin a chat (Beta) | **Pin chat** |
+| Pin a folder to an account (Beta) | **Pin a folder…** under Folder pins |
+| Unpin a chat or folder | **Unpin** next to it |
+
+The button left of **Pin chat** switches to a **compact view**. Each card's top
+becomes one line, with a smaller picture and the email moved into the name's
+tooltip. The usage bars and toggles sit closer and the padding shrinks, but the
+text keeps its size. The page eases into the new view, or switches at once if
+your system asks for reduced motion, and it remembers your choice. In a narrow
+sidebar the Pin buttons shorten to **Chat** and **Folder**, then Beta to **B**,
+before anything wraps.
 
 It opens as an **editor tab**, like a file. It also lives in its own **sidebar
 view**, in a compact one-column layout. Both are always available; the
@@ -87,11 +166,12 @@ extension, which checks it before doing anything.
 
 | I want to… | Do this |
 |---|---|
-| See which account is live | Look at the bottom right |
+| See which account is active | Look at the bottom right |
 | Switch account for every window that isn't pinned | Click the account name |
 | See how full this window's chat is | Look at the dots between the name and the percentages |
 | See my other chats | Hover the dots |
-| See my limits | Look at the three percentages |
+| See my limits | Look at the percentages |
+| See how many days my logins have left | Look after the percentages, such as `16d · pin 23d` |
 | See every account's limits | Hover the percentages |
 | Update every account now | Click the percentages |
 | Something is wrong | **Claude Accounts: Show Status**, then share the output |
@@ -103,14 +183,28 @@ and Show Status.
 ### The usage meter
 
 ```
-📊 36% | 53% | 57%
-   │     │     └── weekly, all models
-   │     └──────── weekly, model-scoped (e.g. Fable)
-   └────────────── session (5 hour)
+📊 36% · F 53% · W 57% · 16d · pin 23d
+   │       │       │       │        └── days left on the pinning login
+   │       │       │       └─────────── days left on the main login
+   │       │       └─────────────────── weekly, all models
+   │       └─────────────────────────── weekly, model-scoped (here Fable)
+   └─────────────────────────────────── session (5 hour)
 ```
 
-It turns orange at 80% and red at 95%. The figures come from Claude Code's own
+The usage figures follow the account the focused chat runs on, so a pinned chat
+shows its own account's. They turn orange at 80% and red at 95%. The figures come from Claude Code's own
 cache. Clicking updates every account's figures, this one straight from Anthropic.
+
+### Days left
+
+The days sit after the usage figures: `16d` is the main login, and `pin 23d`
+(a small pin icon stands in for the word) is the pinning login, shown only when
+the account has one. On a login's last day it
+counts hours (`5h`). Each turns **amber** under 5 days and **red** once it has
+ended, and the hover says *Main login: 16 days left. Pinning login: 23 days
+left.* Turn it off with **⚙ → Days left on the logins**.
+
+This replaces the old `Work (29D)` after the account's name, which is gone.
 
 ### Every account at a glance
 
@@ -127,7 +221,7 @@ weekly Fable limit as a percentage. The tick marks the account this window uses.
 
 Click a name to switch to that account globally (pinned folders are unaffected).
 "(reset)" means that limit has reset since the figure was taken, so 0% is the
-real number now. The **▶** next to an account that isn't live starts its 5-hour
+real number now. The **▶** next to an account that isn't active starts its 5-hour
 session (see [Starting a 5-hour session early](#starting-a-5-hour-session-early)).
 
 ### Plans
@@ -138,19 +232,19 @@ Each account's card shows its plan next to its email, such as **Max 20x**,
 
 Some plans have no 5-hour limit, only weekly ones. For those, the card shows the
 model's weekly limit (Fable) where the 5-hour bar would be, the status bar shows
-two figures (`62% | 98%`, Fable then weekly), and the hover says "none" under
+two figures (`F 62% · W 98%`, Fable then weekly), and the hover says "none" under
 5-hour. **▶** and **Keep alive** don't appear for them: there is no 5-hour
 window to start.
 
 Accounts are listed in the order of the names you see, so renaming one moves it.
 
-**How the figures stay live.** A saved account's login expires 8 hours after it
-was last renewed. To keep reading usage for accounts you are not using, the
+**How the figures stay live.** A saved account's access expires 8 hours after it
+was last renewed (the login itself lasts about 30 days). To keep reading usage for accounts you are not using, the
 extension renews each saved login in the background once it has less than an
 hour left, the same way Claude Code renews its own. Usage is read at most every
 15 minutes per account, and not at all while Anthropic is rate-limiting it.
 
-The live account is read **every 2 minutes**, so an early switch (see
+The active account is read **every 2 minutes**, so an early switch (see
 [Auto-continue after limits](#auto-continue-after-limits)) sees it in time. Every
 VS Code window shares that one reading, so it stays one request every 2 minutes
 however many windows are open. A reading Claude Code just made itself is used
@@ -162,7 +256,7 @@ different part of Anthropic's service.
 
 - **Renew the account Claude Code is using.** Claude Code renews that one
   itself, and the saved copy holds a token it has already replaced. If the
-  extension cannot tell which account is live, it renews nothing that round.
+  extension cannot tell which account is active, it renews nothing that round.
 - **Race another window or a switch.** Every VS Code window shares one account
   store; a lock file makes sure only one renews an account at a time, and a
   switch waits for a renewal in progress to finish.
@@ -193,86 +287,198 @@ reads it again when it has changed, so chats that are already open move to the
 new account with their next message. A reply that is already being written
 finishes on the account it started on.
 
-## Folder pins: a different account per window
+## Logins: main and pinning
 
-Pin a folder to an account and every window of that folder runs Claude Code as
-that account, while all your other windows keep following the switcher. The
-chat list is the same everywhere, so a chat started under one account can be
-continued under another.
+Three words are used throughout:
 
-**Claude Accounts: Pin Folder to Account…** (or **Pin a folder…** on the page)
-asks which folder:
+- **Active account:** the account new chats use and the status bar shows. A
+  switch changes it.
+- **Main login:** the sign-in the switcher saves for each account and switches
+  to. Every account has one.
+- **Pinning login (Beta):** a second, separate sign-in of the *same* account,
+  used only by chats and folders pinned to it. It's optional. It exists
+  because two places can't share one login: each time a login is used it is
+  replaced, so two chats on the same one would sign each other out.
 
-- **This folder** pins the open folder, then offers to reload the window.
-- **Another folder…** pins a folder you pick and opens it in a new window.
-- **Unpin this folder** puts it back on the switcher's account after a reload.
+A login lasts about **30 days**, then you sign in again. The card's thin line
+and the status bar's days show how long each has left (see
+[Days left](#days-left)).
 
-The first time an account is pinned, it needs a one-time browser sign-in of its
-own, a *window login*. The extension asks for it when it is needed. A pinned
-window shows **📌 account** in the status bar; clicking it manages the pin.
+### Signing in
 
-Unpinning keeps the window login, so pinning the folder again later needs no
-sign-in. To remove a window login, use **⋯ → Forget window login** on the
-account's card. Its login is deleted; anything else in its folder that was
-that account's own (a `CLAUDE.md`, settings made in that window) is moved to
-`~/.claude-switcher/backups/` rather than deleted.
+Signing in happens on the Accounts page, with no terminal.
+
+1. **Add account → Sign in to your Claude account.** Pick a name, colour and
+   icon (the name is optional; it can come from the email).
+2. **Finish signing in on the browser.** The page waits while your browser
+   opens. It shows the sign-in link with a copy button, a spinner, and a
+   **Paste code** box for when the browser shows a code instead of handing the
+   sign-in back. **Cancel** stops it. Use a private window if your browser is
+   already signed in to another Claude account.
+3. **Your account has been successfully added** shows the email, organization,
+   plan and days left, then asks **Add a second login?** for pinning. **No
+   thank you** skips it; **Add account for pinning** carries on with a second
+   sign-in. Tick **Don't ask again** to stop the question (turn it back on in
+   **⚙ → Pinning**).
+
+If the account is **already saved**, signing in renews it instead of adding a
+copy: the page says how many days it now has. **Sign in again** renews the main
+login. When the account already uses pinning, its previous main login (if it
+has time left and outlasts the pinning login) becomes the pinning login, so
+nothing is wasted. A login with under 3 days left is kept, with a warning.
+
+**Add account for pinning** (**⋯** menu, or the pin panel) signs the account in
+once more:
+
+- **Same account:** **Account added for pinning!** A box, ticked when it
+  outlasts the main login, says **Use this login to keep main login active?**
+  Ticked, the new login becomes the main one and the old main login serves
+  pinning until it ends.
+- **A different account:** it's added as a card of its own, so you can name it,
+  and the first account still needs its pinning login.
+
+### Renewing and the last-day swap
+
+Logins are never moved, only swapped. Taking a login out of one place and
+putting it in another would sign the first one out, so the switcher
+**exchanges** main and pinning instead: both change places in one step, and
+chats already open pick up their new login on their next message, the same way
+a switch works.
+
+The **last-day swap** is quiet. When the main login is on its last day, the
+pinning login outlasts it, and nothing on either is in the middle of a reply,
+they swap. Idle open chats don't stop it. If the main login ends first (a chat
+was replying), the pinning login takes over as main as soon as no chat on that
+account is replying. The account then **needs a new pinning login**: until you
+add one, its pinned chats and folders start on the active account.
+
+**Reminders** come when a login has **3 days** left and again on its **last
+day**: **Sign in again**, or **Not now**, which asks again a day later. When a
+valid pinning login is about to take over from main, the main login's reminders
+wait.
+
+If a **pinning login ends**, its pinned chats and folders start on the active
+account instead, and the page says so (a notice and a banner, with **Sign in
+again**). Signing in again puts them back.
+
+### `/login` inside Claude Code
+
+Typing `/login` in Claude Code works and is picked up:
+
+- In an ordinary chat it **renews a saved account** by itself (an expired one
+  too), and that account becomes the active one. If the account isn't saved
+  yet, the page offers to save it.
+- Inside a **pinned chat** it renews that account's **pinning login**. Sign in
+  as a different account there and that login is **held**: it stops being the
+  pinning login at once, so new pinned chats start on the active account. The
+  page asks whether to move it (to its own account, or to the saved account it
+  belongs to) or **Discard it**. The chats on that login reopen first, each when
+  its reply finishes; then the login is moved or discarded. If VS Code reloads
+  before you answer, it asks again. Adding a new pinning login meanwhile waits
+  for those chats the same way.
+
+## Pins: a folder or a chat on its own account (Beta)
+
+Pin a folder to an account and every chat in that folder runs as that account,
+in every window, while everything else keeps following the switcher. Pin a
+single chat and only that chat does. The chat list is the same everywhere, so a
+chat started under one account can be continued under another.
+
+Pinned chats and folders run on the account's **pinning login**, so an account
+needs one first. **⋯ → Add account for pinning** adds it, and **Pin chat**,
+**Pin a folder…** and the blue **pin** button on a card offer it when it's
+missing. Pinned chats keep your usual settings, `CLAUDE.md`, skills, plugins,
+MCP servers and history, since they run from `~/.claude` like any other chat.
+
+**Pin chat** and **Pin folder** on the page (or **Claude Accounts: Pin Folder to
+Account…**) ask what to pin and which account. A chat pin wins over its folder's
+pin. Pins take effect at once, with no reload: new chats use the account
+straight away.
+
+A chat that's already open moves when it's reopened. If it's in the middle of a
+reply, the page says **Moves to (account) when this reply finishes**, and
+**Reopen now** moves it straight away after a warning that work in progress
+will be interrupted. The pin panel (the blue **pin** button on a card) lists
+what's pinned, and lets you move or unpin it.
+
+A chat is found by the name its tab shows. A chat with no title yet is named by
+your latest message, so **Pin and reopen** still finds it. If two open chats
+share that name, neither is closed: a notice tells you to close the right one
+and open it again from Claude Code's past conversations.
 
 How it works:
 
 ```
-~/.claude/                          your chats · the one shared history
-~/.claude-switcher/windows/<name>/  used only by windows pinned to <name>
-    .credentials.json   its window login: its own session, never the switcher's saved copy
-    .claude.json        its identity, seeded once with your project trust and MCP servers
-    settings.json       a copy of ~/.claude/settings.json, with this account's Remote Control choice;
-                        anything you change inside that window (/model, /permissions…) is kept
-    projects/ sessions/ file-history/ tasks/ todos/ plans/ agents/ commands/
-                        links into ~/.claude (junctions on Windows, symlinks elsewhere)
+~/.claude-switcher/pinning/<name>/        the account's pinning login (only the login)
+~/.claude-switcher/pinning/<name>.json    when it ends, no secrets
+~/.claude-switcher/pins.tsv               which chats and folders are pinned, for the wrapper
+~/.claude-switcher/bin/claude-wrapper     starts each chat Claude Code opens
 ```
 
-- Claude Code runs inside the extension host of each window and reads
-  `CLAUDE_CONFIG_DIR` from it. This extension starts first and sets the variable
-  for a pinned folder before Claude Code starts.
-- If VS Code restores the Claude panel, Claude Code can start a moment earlier.
-  Its chats still use the pinned account: the variable is read again for every
-  chat process. Only a little startup state, such as its IDE connection file,
-  stays on the default. **Show Status** reports when that happened.
-- A window login is a **separate sign-in** from the account the switcher saved.
-  They never share a refresh token, so renewing one can never sign the other
-  out. The background tracker and the startup login import never touch window
-  logins.
-- Signing in as the wrong account (the browser reused another session) is
-  caught: the login is discarded, not saved.
-- Forgetting a window login removes its links first, then the folder. Your
-  history is never reached through a link; tests prove it with a canary chat.
+- While anything is pinned, the switcher turns on Claude Code's **Claude Process
+  Wrapper** setting and points it at its wrapper. As Claude Code starts a chat,
+  the wrapper looks up the chat's id and folder. If either is pinned, it points
+  the chat at the account's pinning folder (`CLAUDE_SECURESTORAGE_CONFIG_DIR`),
+  which moves only where Claude Code keeps its login. Otherwise it starts the
+  chat exactly as Claude Code asked. With nothing pinned, the setting is turned
+  off again.
+- A pinned chat uses its pinning login only while it has more than an hour
+  left; after that it runs on the active account until you sign in again.
+- A wrapper you set yourself is never replaced: pins then say they can't work.
+- The window's own environment is never changed.
+- **Uninstalling** the extension removes the switcher's wrapper setting from
+  VS Code's settings again (only if it still points at the switcher's folder).
+- **On macOS,** pinning logins live in the Keychain, one item per account named
+  `Claude Code-credentials-<8 characters>`, not in a file.
+- Pins made with 1.3 used a separate *window login*; see
+  [Upgrading from 1.3](#from-13).
 
 Known limits:
 
-- Changing a folder's pin takes a window reload; a prompt running in that
-  window at that moment is interrupted.
-- Don't keep the same chat open in two windows pinned to different accounts:
-  both would write to it.
-- Project trust and MCP servers are copied once, when the window login is set
-  up. Changes made later in a pinned window stay with that account.
-- `claude` typed into a plain terminal in a pinned window still uses the
-  switcher's account.
+- **The shown account.** In a pinned chat, `/status` and the chat itself name
+  the **active** account, because they read the shared Claude Code settings.
+  The requests still use the pinned account's login, so usage and limits count
+  on that account.
+- **MCP servers** set up in Claude Code are in every chat. Their sign-ins are
+  kept with each login, so a pinned chat may ask you to sign in to a server
+  once.
+- **Remote Control and Artifacts** in pinned chats can only be turned off per
+  account, never on: they follow the active account where it has them off; see
+  the next section. Control per account in pinned chats is planned for 1.5.
+- The usage bar for a pinned chat comes from the account's own card.
+- `claude` typed into a plain terminal still uses the switcher's account.
+- Pinning is **Beta**: it works, but expect rough edges.
+
+### Check everything
+
+**⚙ → Check everything** runs a quick look at everything the switcher looks
+after on this PC: each saved login, each pinning login, the wrapper, and every
+pinned chat and folder. Results appear one by one, and a problem comes with a
+fix button such as **Sign in again**.
 
 ## Remote Control and Artifacts per account
 
 Each card has a **Remote Control** switch. Turning it off for an account sets
 `disableRemoteControl` in `~/.claude/settings.json` whenever that account is
-live, and windows pinned to it get the same through their own `settings.json`.
+active, and its pinned chats get the same.
 Chats already running keep their current connection until they are restarted.
 Until some account is set to off, the switcher leaves `disableRemoteControl`
 alone, so a value you set by hand stays as you set it.
+
+**In pinned chats** these switches can only turn things **off**. An account set
+to off has Remote Control off for its pinned chats too, but one set to on can't
+turn it on where it's off everywhere else. The same goes for Artifacts, below.
+The switcher keeps these choices in a small settings file next to the account's
+pinning login, which Claude Code reads for that account's pinned chats only, so
+`~/.claude/settings.json` isn't touched for them.
 
 Each card also has an **Artifacts** switch. Turning it off stops Claude Code
 from publishing Artifacts while that account is in use. It works through Claude
 Code's own setting, `enableArtifact` in `~/.claude/settings.json`:
 
 - Switching to an account set to off writes `"enableArtifact": false`;
-  switching to one set to on removes the line again. Windows pinned to an
-  account get its choice in their own `settings.json`.
+  switching to one set to on removes the line again. Pinned chats follow
+  their account's choice, off only, as described above.
 - The switcher only ever turns Artifacts **off**. "On" means "as Claude Code
   would have it": Artifacts appear only where Anthropic offers them to that
   account, and a managed policy that turns them off still wins.
@@ -293,7 +499,7 @@ How full a chat's context is, read from Claude Code's own chat files.
 - **Hover the dots** for your other recent chats: each one's name, with its own
   dots below it. This window's chat is drawn larger.
 - **On each card**, a faint grid behind the bottom shows that account's most
-  recent chat. A chat counts for the account that was live when it was last
+  recent chat. A chat counts for the account that was active when it was last
   used, or for the account its folder is pinned to. A card stays empty until
   one of its chats has been used.
 - **While a chat is compacting**, its dots fill and empty and its grids
@@ -315,7 +521,7 @@ switching to it, so the window starts now and resets sooner.
 - It uses the account's saved login in a throwaway folder that is deleted
   straight after. If Claude Code renews the login during the run, the renewed
   one is saved back.
-- It isn't offered for the live account (your next message starts that one),
+- It isn't offered for the active account (your next message starts that one),
   for a login that has expired, or while a session is already running. There
   the button is dimmed and says when the session resets.
 
@@ -324,7 +530,7 @@ switching to it, so the window starts now and resets sooner.
 It is off for every account until you turn it on, and the ▶ turns blue on
 accounts that have it.
 
-- It works for the live account too. That one is sent through Claude Code's own
+- It works for the active account too. That one is sent through Claude Code's own
   login, not a saved copy.
 - It only runs while VS Code is open. If the computer was asleep at the reset,
   it sends the "hi" when it wakes.
@@ -358,7 +564,7 @@ for the first one to reset, then switches to it.
 **Switching early, so work doesn't stop.** The sentence's first choice can be a
 share of the limit instead: *"When a chat [reaches 80% of its limit ▾], [switch
 to a different account ▾] using [the account with the most limit ▾]"*, with the
-share anywhere from 50% to 90%. When the live account gets there, the extension
+share anywhere from 50% to 90%. When the active account gets there, the extension
 switches before anything stops, and the chat that is running carries on from its
 next request. Choose **ask me what to do** instead to be asked first.
 
@@ -456,7 +662,10 @@ passphrase separately from the file.
     <name>.enc                      encrypted credentials (see Security)
     <name>.meta.json                email, org, when it was saved
   accounts/<name>/                  scratch space used during a login, then emptied
-  windows/<name>/                   an account's window login, for pinned folders
+  pinning/<name>/                   the account's pinning login (only its credentials)
+  pinning/<name>.json               when that login ends, no secrets
+  pins.tsv                          the pins, as the wrapper reads them
+  bin/                              the wrapper that starts each chat Claude Code opens
   usage/                            the last live usage figures per account
   locks/                            short-lived locks, so windows never renew at once
 ```
@@ -464,11 +673,14 @@ passphrase separately from the file.
 `registry.json` is plain JSON and safe to edit by hand; the extension watches it
 and reloads.
 
-**On macOS, Claude Code does not keep its live login in a file.** It uses the
+**On macOS, Claude Code does not keep its current login in a file.** It uses the
 login Keychain item `Claude Code-credentials`, and falls back to
 `~/.claude/.credentials.json` only when the Keychain has nothing. The switcher
 reads and writes that same item, so a switch looks to Claude Code exactly like a
-fresh sign-in. **Show Status** prints where it is looking.
+fresh sign-in. **Show Status** prints where it is looking. Pinning logins use
+the Keychain too: each has an item of its own, named after its folder
+(`Claude Code-credentials-` and 8 characters), so they never touch the main
+one.
 
 ### Security
 
@@ -492,6 +704,10 @@ not installed.
 - A refresh token is never duplicated: a login is *moved* into the encrypted
   profile, and the plaintext copy is deleted only after the encrypted one has
   been read back and verified.
+- A pinning login is kept the way Claude Code keeps its own (a credentials
+  file in the switcher's folder on Windows and Linux, the Keychain on macOS),
+  not encrypted like the saved main logins, because Claude Code has to read it
+  directly.
 - Decryption is authenticated, so a tampered profile fails loudly rather than
   producing garbage.
 - The extension never logs, prints or transmits token material.
@@ -506,7 +722,7 @@ your passphrase (scrypt and AES-256-GCM), not with this machine's store.
 ## Troubleshooting
 
 **"Switched … but it reports signed out"** · That account's refresh token
-expired (they last a few weeks). Click **Sign in again** on its card.
+ended (a login lasts about 30 days). Click **Sign in again** on its card.
 
 **A chat is still using the old account** · Its next message should go out as
 the new one. If it doesn't, reload the window.
@@ -526,12 +742,19 @@ Keychain is locked, rather than switching to a stale login.
 Allow**. That is the system tool the extension uses to read and write the
 login, the same one Claude Code itself uses.
 
-**The account name has an orange background** · The live login isn't saved as a
+**The account name has an orange background** · The current login isn't saved as a
 profile. Click **Save it** on the Accounts page, or you will lose it the next
 time you switch away.
 
-**A pinned window says it is using the global account** · Its account has no
-window login yet. Click **Sign In Now** on the message.
+**A pinned folder or chat says its account needs a pinning login** · The
+account has no pinning login that works (it was never added, or it ended), so
+its chats use the active account. Click **Sign in again** or **Add account for
+pinning** on the page. **⚙ → Check everything** shows which pins are affected.
+
+**A sign-in on the page doesn't finish** · If your browser shows a code instead
+of handing the sign-in back, copy it into **Paste code**. A wrong code starts
+the sign-in again with a message. **Cancel** stops it; **Show the browser**
+opens the link again.
 
 **`claude` not found** · The extension checks the usual install locations for
 your platform (`AppData\Roaming\npm\...` and `~\.local\bin` on Windows;
@@ -547,6 +770,24 @@ material.
 ## Upgrading from an earlier version
 
 What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
+### From 1.3
+
+Installing 1.4 upgrades it in place, and your accounts, names, icons and pins
+carry over. What changes:
+
+- **Pin keys are gone.** Pinned chats and folders now use the account's
+  **pinning login** instead. At the first start, each window login from 1.3
+  that still works becomes that account's pinning login, so those pins keep
+  working, and the old window folders are removed. Your own files from them
+  are kept in `~/.claude-switcher/backups/`. A window that is still open is
+  left for a later start. Anything else needs
+  **⋯ → Add account for pinning** once; **⚙ → Check everything** lists what's
+  missing.
+- **Signing in happens on the page,** not in a terminal.
+- **The status bar's `Work (29D)` is replaced** by days after the usage
+  figures, and the account you are using is now called the **active account**.
+- **Pinning is Beta.**
 
 ### From 1.3.0
 
@@ -615,7 +856,7 @@ installing one replaces the other, so you can never end up with two status bars
 fighting over the same account store.
 
 ```powershell
-npm test              # 877 tests, no network, no touching your real ~/.claude
+npm test              # about 1,650 tests, no network, no touching your real ~/.claude
 npm run stage         # build both editions into dist/ without packaging
 npm run package       # both .vsix files into dist/
 npm run package:main  # just the release

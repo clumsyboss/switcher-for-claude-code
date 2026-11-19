@@ -72,12 +72,15 @@ async function main() {
   const capturedBefore = meta('alpha').capturedAt
   refreshReply = tokenOk('A2')
   reset()
+  const renewFrom = Date.now()
   let r = await tracker.renew(ROOT, 'alpha')
+  const renewTo = Date.now()
   check('renewed', r.renewed === true, JSON.stringify(r))
   check('with its own refresh token, once', calls.refresh.length === 1 && calls.refresh[0] === 'RT-A', calls.refresh.join(','))
   check('new access token stored', saved('alpha').accessToken === 'AT-A2')
   check('new refresh token stored', saved('alpha').refreshToken === 'RT-A2')
-  check('expires 8 h from now', Math.abs(saved('alpha').expiresAt - (Date.now() + 8 * H)) < 5000)
+  const exp = saved('alpha').expiresAt
+  check('expires 8 h from now', exp >= renewFrom + 8 * H && exp <= renewTo + 8 * H, exp - renewFrom - 8 * H)
   check('plan details kept', saved('alpha').subscriptionType === 'max' && saved('alpha').rateLimitTier === 'tier')
   check('"saved at" untouched, so a newer sign-in is never mistaken for older', meta('alpha').capturedAt === capturedBefore)
   check('renewal time recorded', !!meta('alpha').renewedAt)

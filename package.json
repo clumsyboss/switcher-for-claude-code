@@ -1,8 +1,9 @@
 {
   "name": "account-switcher-claude-code",
-  "displayName": "Switcher for Claude Code (Experimental)",
-  "description": "Switch between Claude accounts in VS Code, see every account's limits, and pin folders to their own account.",
-  "version": "1.3.1",
+  "displayName": "Switcher for Claude Code (Experimental) [Unofficial]",
+  "description": "Switch between multiple Claude Code accounts in one click. See every account's 5-hour and weekly usage limits, auto-continue chats when a limit hits, and pin folders or chats to their own Claude account. Unofficial; not affiliated with Anthropic.",
+  "icon": "media/icon.png",
+  "version": "1.4.0",
   "publisher": "clumsyboss",
   "private": true,
   "license": "MIT",
@@ -14,7 +15,8 @@
     "edition": "experimental"
   },
   "scripts": {
-    "test": "node test/harness.js && node test/claude.test.js && node test/plans.test.js && node test/profiles.test.js && node test/switch.test.js && node test/preferences.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js && node test/autocontinue.test.js",
+    "vscode:uninstall": "node ./scripts/uninstall.js",
+    "test": "node test/harness.js && node test/claude.test.js && node test/plans.test.js && node test/welcome.test.js && node test/chatpins.test.js && node test/logins.test.js && node test/signin.test.js && node test/health.test.js && node test/uninstall.test.js && node test/hub-contract.test.js && node test/profiles.test.js && node test/switch.test.js && node test/preferences.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js && node test/autocontinue.test.js",
     "stage": "node build.js --no-package",
     "package": "node build.js",
     "package:main": "node build.js main",
@@ -24,7 +26,35 @@
     "vscode": "^1.85.0"
   },
   "categories": [
+    "AI",
     "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "claude-code",
+    "anthropic",
+    "account switcher",
+    "switch account",
+    "multiple accounts",
+    "multi account",
+    "profiles",
+    "claude max",
+    "claude pro",
+    "claude team",
+    "claude ultra",
+    "usage limit",
+    "rate limit",
+    "5-hour limit",
+    "weekly limit",
+    "usage",
+    "quota",
+    "auto continue",
+    "login",
+    "ai",
+    "llm",
+    "opus",
+    "fable"
   ],
   "main": "./extension.js",
   "activationEvents": [
@@ -56,6 +86,12 @@
         "icon": "$(pin)"
       },
       {
+        "command": "claudeswitcher.pinChat",
+        "title": "Claude Accounts: Pin Chat to Account…",
+        "category": "Claude Accounts",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "claudeswitcher.refreshAllAccounts",
         "title": "Claude Accounts: Update Usage",
         "category": "Claude Accounts",
@@ -79,11 +115,6 @@
       {
         "command": "claudeswitcher.relogin",
         "title": "Claude Accounts: Sign In Again…",
-        "category": "Claude Accounts"
-      },
-      {
-        "command": "claudeswitcher.windowLogin",
-        "title": "Claude Accounts: Sign In Window Login…",
         "category": "Claude Accounts"
       },
       {
@@ -136,6 +167,48 @@
           "scope": "machine",
           "description": "Show every saved account's 5-hour and weekly usage, renewing saved logins in the background so the figures stay live. Turn off to stop all background renewals and usage checks."
         },
+        "claudeswitcher.confirmOrganizationSwitch": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Ask before a switch you make moves to an account in another organization. Chats that continue there lose Claude's earlier thinking, so their next replies may be slower and use more tokens. Automatic switches never ask."
+        },
+        "claudeswitcher.cards.tint": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Tint each account's card on the Accounts page with the account's colour."
+        },
+        "claudeswitcher.cards.context": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Show how full each account's latest chat is, as a faint grid on its card."
+        },
+        "claudeswitcher.cards.plan": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show each account's plan (Free, Pro, Max, Ultra, Team) and organization on its card."
+        },
+        "claudeswitcher.cards.toggles": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show the Remote Control and Artifacts switches on each card."
+        },
+        "claudeswitcher.statusBar.usage": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show the active account's usage figures in the status bar."
+        },
+        "claudeswitcher.statusBar.loginDays": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show how many days the active account's main and pinning logins have left, after the usage figures in the status bar, such as 16d and 23d."
+        },
         "claudeswitcher.usageIcon": {
           "type": "string",
           "default": "pulse",
@@ -155,7 +228,6 @@
         { "command": "claudeswitcher.switchTo", "when": "false" },
         { "command": "claudeswitcher.refreshUsage", "when": "false" },
         { "command": "claudeswitcher.relogin", "when": "false" },
-        { "command": "claudeswitcher.windowLogin", "when": "false" },
         { "command": "claudeswitcher.openAccountsTab", "when": "false" },
         { "command": "claudeswitcher.startSession", "when": "false" }
       ],

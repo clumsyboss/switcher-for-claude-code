@@ -25,9 +25,15 @@ const switchLib = require('./lib/switch')
 const preferencesLib = require('./lib/preferences')
 const contextLib = require('./lib/context')
 const pageLib = require('./ui/page')
+const welcomeLib = require('./lib/welcome')
+const chatPins = require('./lib/chatpins')
+const loginsLib = require('./lib/logins')
+const signinLib = require('./lib/signin')
+const healthLib = require('./lib/health')
 
 const DEFAULT_NAME = store.DEFAULT_NAME
 const VIEW_ID = 'claudeswitcher.accountsView'
+const PANEL_TYPE = 'claudeswitcher.accounts'
 const CONTAINER_ID = 'claudeAccounts'
 
 let edition = editionLib.EXPERIMENTAL
@@ -35,6 +41,8 @@ let version = null
 
 let statusBar
 let usageBar
+let daysBar
+let pinDaysBar
 let usageTimer
 let output
 
@@ -67,31 +75,44 @@ function pinnedHere() {
 }
 
 function applyPin() {
-  const claudeExt = vscode.extensions && vscode.extensions.getExtension('anthropic.claude-code')
-  const claudeWasActive = !!(claudeExt && claudeExt.isActive)
-  let d
-  try {
-    d = windowsLib.decide(root(), firstFolder(), process.env)
-  } catch (e) {
-    pinState = { error: e && e.message }
+  const folder = firstFolder()
+  const launched = windowPinnedDir()
+  if (launched) {
+    pinState = { source: 'launch', dir: launched, name: windowsLib.nameForDir(root(), launched), ready: true, folder }
     return
   }
-  if (!d || !d.source) return
-  if (d.ready && d.name && windowsLib.isWindowDir(root(), d.dir)) {
-    try { windowsLib.syncSettings(root(), d.name) } catch (e) { d.settingsError = e && e.message }
-  }
-  if (d.source === 'pin' && d.ready) {
-    process.env.CLAUDE_CONFIG_DIR = d.dir
-    if (process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined) {
-      process.env.CLAUDESWITCHER_SECURESTORAGE_CONFIG_DIR = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
-      delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
-    }
-  }
-  pinState = { ...d, folder: firstFolder(), claudeWasActive }
+  let name = null
+  try { name = folder ? store.getPin(root(), folder) : null } catch (e) { pinState = { error: e && e.message }; return }
+  if (!name) { pinState = null; return }
+  const ready = pinningReady(name)
+  pinState = { source: 'pin', name, ready, folder, problem: ready ? null : 'no-pinning' }
+}
+
+const PINNING_MARGIN_MS = 60 * 60 * 1000
+
+function pinningOf(name) {
+  try {
+    const i = name ? loginsLib.info(root(), name) : null
+    return i && i.expiresAt ? { expiresAt: i.expiresAt } : null
+  } catch { return null }
+}
+
+function pinningReady(name) {
+  const p = pinningOf(name)
+  return !!(p && p.expiresAt > Date.now() + PINNING_MARGIN_MS)
+}
+
+function repin() {
+  applyPin()
+  if (pinState) log('folder pin: ' + JSON.stringify({ source: pinState.source, name: pinState.name, ready: pinState.ready }))
+  syncPins().catch((e) => log('pins: ' + (e && e.message)))
+  refreshAll()
 }
 
 function currentAccount() {
-  if (pinnedHere()) return { dir: pinState.dir, name: pinState.name, pinned: true }
+  const chat = focusedChatPin()
+  if (chat) return { dir: null, name: chat, pinned: true, byKey: true, chat: true }
+  if (pinnedHere()) return { dir: pinState.source === 'launch' ? pinState.dir : null, name: pinState.name, pinned: true, byKey: pinState.source === 'pin' }
   const launched = windowPinnedDir()
   if (launched) return { dir: launched, name: windowsLib.nameForDir(root(), launched), pinned: true }
   return { dir: null, name: profilesLib.activeProfile(root()), pinned: false }
@@ -104,28 +125,46 @@ function trustedTip(lines, commands) {
   return md
 }
 
+function loginExpiryOf(name, dir, inUse) {
+  const live = inUse ? usageLib.readLiveLoginExpiry(root(), dir) : null
+  if (live) return live
+  const m = name ? profilesLib.readMeta(root(), name) : {}
+  return typeof m.loginExpiresAt === 'number' ? m.loginExpiresAt : null
+}
+
+function loginSuffix(expiresAt) {
+  if (!prefOf('statusLoginDays')) return ''
+  const t = usageLib.loginDaysText(expiresAt)
+  return t ? ' (' + t + ')' : ''
+}
+
+function loginLine(expiresAt) {
+  if (typeof expiresAt !== 'number') return null
+  const days = Math.floor((expiresAt - Date.now()) / 86400000)
+  const when = new Date(expiresAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+  return expiresAt < Date.now() ? '⚠ Login expired on ' + when + '. Sign in again from the Accounts page.'
+    : 'Login: sign in again by ' + when + ' (' + (days === 0 ? 'today' : days === 1 ? '1 day left' : days + ' days left') + ').'
+}
+
 function updateStatusBar() {
   if (!statusBar) return
 
   if (pinnedHere()) {
     const name = pinState.name
     const disp = name ? store.displayOf(root(), name) : { label: 'pinned', icon: 'account' }
-    const id = name ? windowsLib.identity(root(), name) : null
+    const meta = name ? profilesLib.readMeta(root(), name) || {} : {}
     statusBar.command = 'claudeswitcher.pinFolder'
+    const pin = pinState.source === 'pin' && name ? pinningOf(name) : null
+    const until = pin ? pin.expiresAt : loginExpiryOf(name, pinState.dir, true)
     statusBar.text = '$(pin) ' + disp.label
     statusBar.backgroundColor = undefined
     statusBar.tooltip = trustedTip([
       '**This window is pinned to ' + mdEscape(disp.label) + '**',
-      id && id.email ? 'Email: ' + mdEscape(id.email) : null,
-      id && id.org ? 'Org: ' + mdEscape(id.org) : null,
+      meta.email ? 'Email: ' + mdEscape(meta.email) : null,
+      pin ? 'Pinning login: ' + daysWords(pin.expiresAt) + '.' : loginLine(until),
       pinState.folder ? 'Folder: ' + mdEscape(pinState.folder) : null,
-      'Chats in this window run as ' + mdEscape(disp.label) + '. The global switcher does not change ' +
-        'this window, and the chat list is the same one every window shows.',
-      pinState.claudeWasActive
-        ? '_Claude Code started a moment before the pin was applied. Chats still run as ' + mdEscape(disp.label) + '._'
-        : null,
-      name && store.getRemote(root(), name) === 'off' ? 'Remote Control: **off** for this account.' : null,
-      name && store.getArtifacts(root(), name) === 'off' ? 'Artifacts: **off** for this account.' : null,
+      'Chats in this folder run as ' + mdEscape(disp.label) + ', on its pinning login, so they never sign your other chats out. ' +
+        'They keep your usual settings, skills and history. The global switcher doesn\'t change this folder.',
       '', 'Click to change or remove this folder\'s pin.',
     ], [])
     statusBar.show()
@@ -138,12 +177,14 @@ function updateStatusBar() {
   const label = (disp && disp.label) || active || (id && id.email) || 'not saved'
   const launched = windowPinnedDir()
   statusBar.command = 'claudeswitcher.globalSwitch'
+  const until = loginExpiryOf(active, null, true)
   statusBar.text = store.iconText((disp && disp.icon) || 'account') + ' ' + label
   statusBar.backgroundColor = active ? undefined : new vscode.ThemeColor('statusBarItem.warningBackground')
   statusBar.tooltip = trustedTip([
     '**Claude account: ' + mdEscape(label) + '**',
     id && id.email ? 'Email: ' + mdEscape(id.email) : null,
     id && id.org ? 'Org: ' + mdEscape(id.org) : null,
+    loginLine(until),
     'Every window that isn\'t pinned uses this account. Your chats stay right where they are when you switch.',
     active ? null : '⚠ This login isn\'t saved yet. Open the Claude Accounts page and choose "Save it" so you can come back to it later.',
     active && store.getRemote(root(), active) === 'off' ? 'Remote Control: **off** for this account.' : null,
@@ -155,6 +196,61 @@ function updateStatusBar() {
   statusBar.show()
 }
 
+function usageShort(usage) {
+  if (!usage) return null
+  const p = (l) => (l && typeof l.percent === 'number' ? Math.round(l.percent) + '%' : null)
+  const sc = Array.isArray(usage.scoped) ? usage.scoped[0] : null
+  const model = sc && sc.scope && sc.scope.model && sc.scope.model.display_name
+  const cells = [
+    usage.session ? p(usage.session) : null,
+    sc && p(sc) ? String(model || 'S').charAt(0).toUpperCase() + ' ' + p(sc) : null,
+    usage.weekly && p(usage.weekly) ? 'W ' + p(usage.weekly) : null,
+  ].filter(Boolean)
+  return cells.length ? cells.join(' · ') : null
+}
+
+function daysShort(expiresAt) {
+  const ms = expiresAt - Date.now()
+  if (ms <= 0) return 'ended'
+  return ms < DAY_MS ? Math.max(1, Math.floor(ms / 3600000)) + 'h' : Math.floor(ms / DAY_MS) + 'd'
+}
+
+function daysColour(expiresAt) {
+  if (expiresAt <= Date.now()) return new vscode.ThemeColor('errorForeground')
+  return expiresAt - Date.now() < 5 * DAY_MS ? new vscode.ThemeColor('editorWarning.foreground') : undefined
+}
+
+function updateDaysBar() {
+  if (!daysBar || !pinDaysBar) return
+  const cur = currentAccount()
+  const name = cur.name
+  const main = name && !cur.dir ? mainEndOf(name) : loginExpiryOf(name, cur.dir, true)
+  const pin = name ? pinningOf(name) : null
+  if (!prefOf('statusLoginDays') || typeof main !== 'number') { daysBar.hide(); pinDaysBar.hide(); return }
+  const tip = ['Main login: ' + (main <= Date.now() ? 'ended.' : daysPhrase(main) + ' left.'),
+    pin ? 'Pinning login: ' + (pin.expiresAt <= Date.now() ? 'ended.' : daysPhrase(pin.expiresAt) + ' left.') : null].filter(Boolean).join(' ')
+  daysBar.text = daysShort(main)
+  daysBar.color = daysColour(main)
+  daysBar.tooltip = tip
+  daysBar.show()
+  if (!pin) { pinDaysBar.hide(); return }
+  pinDaysBar.text = '· $(pin) ' + daysShort(pin.expiresAt)
+  pinDaysBar.color = daysColour(pin.expiresAt)
+  pinDaysBar.tooltip = tip
+  pinDaysBar.show()
+}
+
+function focusedChatPin() {
+  try {
+    const g = vscode.window.tabGroups && vscode.window.tabGroups.activeTabGroup
+    const t = g && g.activeTab
+    const view = t && t.input && t.input.viewType
+    if (typeof view !== 'string' || !/claudeVSCodePanel$/.test(view)) return null
+    const p = chatPins.read(root()).find((x) => chatPins.tabMatches(t.label, x.title))
+    return p && pinningReady(p.name) ? p.name : null
+  } catch { return null }
+}
+
 function usageIcon() {
   const v = vscode.workspace.getConfiguration('claudeswitcher').get('usageIcon')
   return v && store.validIcon(v) ? v : 'pulse'
@@ -162,9 +258,10 @@ function usageIcon() {
 
 function updateUsageBar() {
   if (!usageBar) return
+  if (!prefOf('statusUsage')) { usageBar.hide(); return }
   const cur = currentAccount()
-  const usage = usageLib.readBest(root(), cur.dir)
-  const text = usageLib.compactText(usage)
+  const usage = cur.byKey ? usageOfAccount(cur.name) : usageLib.readBest(root(), cur.dir)
+  const text = usageShort(usage)
   const top = text ? usageLib.peak(usage) : 0
   usageBar.text = updatingAll ? '$(sync~spin) Updating…' : store.iconText(usageIcon()) + ' ' + (text || '--')
   usageBar.backgroundColor = top >= 95
@@ -172,6 +269,7 @@ function updateUsageBar() {
     : top >= 80 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined
   usageBar.tooltip = usageTooltip(cur, usage)
   usageBar.show()
+  updateDaysBar()
 }
 
 function refreshAll() {
@@ -264,6 +362,76 @@ function contextByAccount() {
   return out
 }
 
+function orgOf(name) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(store.configDir(root(), name), '.claude.json'), 'utf8'))
+    return (j && j.oauthAccount && j.oauthAccount.organizationUuid) || null
+  } catch { return null }
+}
+
+const PREFS = {
+  tint: { key: 'cards.tint', def: true },
+  context: { key: 'cards.context', def: false },
+  plan: { key: 'cards.plan', def: true },
+  cardToggles: { key: 'cards.toggles', def: true },
+  statusUsage: { key: 'statusBar.usage', def: true },
+  statusLoginDays: { key: 'statusBar.loginDays', def: true },
+  confirmOrgSwitch: { key: 'confirmOrganizationSwitch', def: true },
+  trackAll: { key: 'trackAllAccounts', def: true },
+  accountsView: { key: 'accountsView', def: 'tab', values: ['tab', 'sidebar'] },
+  askSecondLogin: { state: 'claudeswitcher.askSecondLogin', def: true },
+  compact: { state: 'claudeswitcher.compactView', def: false },
+}
+
+function prefOf(name) {
+  const p = PREFS[name]
+  if (p.state) {
+    const v = extContext && extContext.globalState ? extContext.globalState.get(p.state) : undefined
+    return typeof v === 'boolean' ? v : p.def
+  }
+  const v = vscode.workspace.getConfiguration('claudeswitcher').get(p.key)
+  if (p.values) return p.values.includes(v) ? v : p.def
+  return typeof v === 'boolean' ? v : p.def
+}
+
+function allPrefs() {
+  const out = {}
+  for (const name of Object.keys(PREFS)) out[name] = prefOf(name)
+  return out
+}
+
+function setPref(name, value) {
+  const p = Object.prototype.hasOwnProperty.call(PREFS, name) ? PREFS[name] : null
+  if (!p) return Promise.resolve()
+  if (p.values ? !p.values.includes(value) : typeof value !== 'boolean') return Promise.resolve()
+  if (p.state) return extContext && extContext.globalState ? Promise.resolve(extContext.globalState.update(p.state, value)) : Promise.resolve()
+  return vscode.workspace.getConfiguration('claudeswitcher').update(p.key, value, vscode.ConfigurationTarget.Global)
+}
+
+const PRESERVED_THINKING_URL = 'https://platform.claude.com/docs/en/build-with-claude/preserved-thinking'
+
+function setConfirmOrgSwitch(on) { return setPref('confirmOrgSwitch', !!on) }
+
+function confirmOrgSwitchOn() { return prefOf('confirmOrgSwitch') }
+
+async function confirmOrgSwitch(name) {
+  if (!confirmOrgSwitchOn()) return true
+  const active = profilesLib.activeProfile(root())
+  if (!name || name === active) return true
+  const id = active ? null : profilesLib.currentIdentity()
+  const from = active ? orgOf(active) : (id && id.orgUuid)
+  const to = orgOf(name)
+  if (!from || !to || from === to) return true
+  const pick = await notify('warn', labelOf(name) + ' is in another organization',
+    { modal: true, detail: 'Chats that continue there can’t use Claude’s earlier thinking or cache, so the whole chat is read again and uses more tokens.' },
+    'Learn More', 'Switch')
+  if (pick === 'Learn More') {
+    vscode.env.openExternal(vscode.Uri.parse(PRESERVED_THINKING_URL))
+    return false
+  }
+  return pick === 'Switch'
+}
+
 function trackingEnabled() {
   return vscode.workspace.getConfiguration('claudeswitcher').get('trackAllAccounts') !== false
 }
@@ -275,6 +443,12 @@ function useCell(l, withTime) {
   if (l.resetSince) return '0% (reset)'
   const left = withTime ? usageLib.untilTime(l.resetsAt) : null
   return l.percent + '%' + (left ? ' (' + left + ')' : '')
+}
+
+function usageOfAccount(name) {
+  const r = snapshotRows().find((x) => x.name === name)
+  if (!r) return null
+  return { session: r.session || null, weekly: r.weekly || null, scoped: r.scoped ? [r.scoped] : [], fetchedAtMs: r.fetchedAtMs || null }
 }
 
 function snapshotRows() {
@@ -351,12 +525,12 @@ async function startSessionFor(nameArg) {
   if (!name || startingSessions.has(name)) return
   const label = labelOf(name)
   if (name === profilesLib.activeProfile(root())) {
-    vscode.window.showInformationMessage('"' + label + '" is the account Claude Code is using, so its session starts with your next message.')
+    notify('info', '"' + label + '" is the account Claude Code is using, so its session starts with your next message.')
     return
   }
   const row = snapshotRows().find((r) => r.name === name)
   if (row && sessionRunning(row.session)) {
-    vscode.window.showInformationMessage('"' + label + '" already has a 5-hour session running. It resets in ' +
+    notify('info', '"' + label + '" already has a 5-hour session running. It resets in ' +
       (usageLib.untilTime(row.session.resetsAt) || 'a moment') + '.')
     return
   }
@@ -369,14 +543,14 @@ async function startSessionFor(nameArg) {
       () => kickoffLib.startSession(root(), name, { renew: trackerLib.renew, run: kickoffRun || undefined }))
     if (!res || !res.ok) {
       log('start session for "' + name + '" failed: ' + (res && res.reason))
-      vscode.window.showWarningMessage("Couldn't start a session for \"" + label + '": ' + ((res && res.reason) || 'something went wrong') + '.')
+      notify('warn', "Couldn't start a session for \"" + label + '": ' + ((res && res.reason) || 'something went wrong') + '.')
       return
     }
     log('started a 5-hour session for "' + name + '"')
     try { await trackerLib.poll(root(), name, { force: true }) } catch (e) { log('usage after start: ' + (e && e.message)) }
     const after = snapshotRows().find((r) => r.name === name)
     const left = after && sessionRunning(after.session) ? usageLib.untilTime(after.session.resetsAt) : null
-    vscode.window.showInformationMessage('Started a 5-hour session for "' + label + '".' +
+    notify('info', 'Started a 5-hour session for "' + label + '".' +
       (left ? ' It resets in ' + left + '.' : ' Its usage will catch up in a moment.'))
   } finally {
     startingSessions.delete(name)
@@ -416,7 +590,7 @@ function chatPin(chat) {
 function openChat(sessionId, prompt) {
   vscode.commands.executeCommand('claude-vscode.primaryEditor.open', sessionId, prompt).then(() => {}, (e) => {
     log('open chat: ' + (e && e.message))
-    vscode.window.showWarningMessage("Couldn't open the chat in Claude Code. Open it yourself and type \"continue\".")
+    notify('warn', "Couldn't open the chat in Claude Code. Open it yourself and type \"continue\".")
   })
 }
 
@@ -478,7 +652,7 @@ function handleStop(chat, stop, info, settings) {
   }
   if (canWait) { waitForReset(entry, 'It'); return }
   autoLib.mark(root(), entry.id, { state: 'skipped' })
-  vscode.window.showInformationMessage('"' + entry.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] +
+  notify('info', '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] +
     ', which resets too far ahead to wait for, and no other account has room.')
 }
 
@@ -488,7 +662,7 @@ function askAbout(entry, to, canWait) {
   const WAIT = canWait ? 'Continue at ' + clockText(entry.resetAt) : null
   const what = '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + (entry.account ? ' on ' + labelOf(entry.account) : '') +
     '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? ' Its folder is pinned, so it stays on that account.' : '')
-  vscode.window.showInformationMessage(what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
+  notify('info', what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
     if (pick && pick === SWITCH) switchAndContinue(entry, to)
     else if (pick && pick === WAIT) waitForReset(entry, 'It')
     else {
@@ -501,7 +675,7 @@ function askAbout(entry, to, canWait) {
 function waitForReset(entry, subject) {
   autoLib.mark(root(), entry.id, { state: 'waiting' })
   postState()
-  vscode.window.showInformationMessage(subject + ' will continue "' + entry.title + '" at ' + clockText(entry.resetAt) +
+  notify('info', subject + ' will continue "' + entry.title + '" at ' + clockText(entry.resetAt) +
     (entry.to ? ' on ' + labelOf(entry.to) + ', the first account with room again.' : ', when the limit resets.'), 'Cancel').then((pick) => {
     if (pick === 'Cancel') { autoLib.mark(root(), entry.id, { state: 'cancelled' }); postState() }
   }, () => {})
@@ -518,7 +692,7 @@ async function switchAndContinue(entry, to) {
   try { await switchTo(to) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
   if (profilesLib.activeProfile(root()) !== to) {
     autoLib.mark(root(), entry.id, { state: 'failed' })
-    vscode.window.showWarningMessage("Couldn't switch to \"" + labelOf(to) + '", so "' + entry.title + "\" wasn't continued.")
+    notify('warn', "Couldn't switch to \"" + labelOf(to) + '", so "' + entry.title + "\" wasn't continued.")
     return
   }
   await new Promise((r) => setTimeout(r, 2000))
@@ -537,7 +711,7 @@ async function deliverNotice(id, how, opts) {
   if (!info || !info.inbox || !info.name) {
     autoLib.mark(root(), id, { state: 'closed' })
     postState()
-    vscode.window.showInformationMessage('"' + e.title + '" was closed, so it couldn\'t be continued.', 'Open Chat')
+    notify('info', '"' + e.title + '" was closed, so it couldn\'t be continued.', 'Open Chat')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
     return
   }
@@ -550,7 +724,7 @@ async function deliverNotice(id, how, opts) {
   if (!autoLib.canReceive(e.permissionMode)) {
     autoLib.mark(root(), id, { state: 'manual' })
     postState()
-    vscode.window.showInformationMessage((how === 'switched' ? 'Switched to ' + labelOf(profilesLib.activeProfile(root())) + '. '
+    notify('info', (how === 'switched' ? 'Switched to ' + labelOf(profilesLib.activeProfile(root())) + '. '
       : 'The limit has reset. ') + '"' + e.title + '" skips permission prompts, so it only takes "continue" from you.', 'Open Chat')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
     return
@@ -562,7 +736,7 @@ async function deliverNotice(id, how, opts) {
   } else {
     autoLib.mark(root(), id, { state: 'failed' })
     log('auto-continue: sending failed: ' + (res && res.reason))
-    vscode.window.showWarningMessage("Couldn't continue \"" + e.title + '" automatically: ' + ((res && res.reason) || 'the notice wasn\'t sent') + '.',
+    notify('warn', "Couldn't continue \"" + e.title + '" automatically: ' + ((res && res.reason) || 'the notice wasn\'t sent') + '.',
       'Continue Now').then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
   }
   postState()
@@ -575,7 +749,7 @@ function followUp(id, e) {
     if (info && info.status === 'busy') return
     if (Date.now() - (e.sentAt || 0) < 5 * 60e3) return
     autoLib.mark(root(), id, { state: 'failed' })
-    vscode.window.showWarningMessage('"' + e.title + '" didn\'t pick up the notice to continue.', 'Continue Now')
+    notify('warn', '"' + e.title + '" didn\'t pick up the notice to continue.', 'Continue Now')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
     return
   }
@@ -583,16 +757,16 @@ function followUp(id, e) {
   autoLib.mark(root(), id, { state: outcome })
   if (outcome === 'continued') {
     log('auto-continue: "' + e.title + '" continued')
-    vscode.window.showInformationMessage('Continued "' + e.title + '" after its usage limit.')
+    notify('info', 'Continued "' + e.title + '" after its usage limit.')
   } else if (outcome === 'replied') {
-    vscode.window.showWarningMessage('"' + e.title + '" answered the notice instead of continuing. ' +
+    notify('warn', '"' + e.title + '" answered the notice instead of continuing. ' +
       'Some chats wait for you to say so first: tell it once to accept Switcher\'s notices, and it continues by itself from then on.',
     'Continue Now', 'Let It Trust Switcher').then((p) => {
       if (p === 'Continue Now') openChat(e.chat, 'continue')
       else if (p === 'Let It Trust Switcher') {
         autoLib.mark(root(), id, { state: 'trust', trustAt: Date.now() })
         openChat(e.chat, autoLib.TRUST_PROMPT)
-        vscode.window.showInformationMessage('Send the message typed into the chat. Switcher for Claude Code then sends its notice again.')
+        notify('info', 'Send the message typed into the chat. Switcher for Claude Code then sends its notice again.')
       }
     }, () => {})
   }
@@ -653,7 +827,7 @@ async function pollLiveUsage() {
     try {
       if (fresh()) return
       const res = await (liveUsageRun || liveLib.fetchUsage)(null)
-      if (res && res.ok) usageLib.writeLiveCache(root(), null, res.utilization)
+      if (res && res.ok) usageLib.writeLiveCache(root(), null, res.utilization, res.loginExpiresAt)
       else if (res && res.rateLimited) usageLib.pauseUntil(root(), key, Date.now() + (res.retryAfterMs || DEFAULT_USAGE_PAUSE_MS))
       else log('live usage (every minute): ' + (res && res.reason))
     } finally { release() }
@@ -692,7 +866,7 @@ function earlySwitchCheck() {
   const what = labelOf(live) + ' reached ' + Math.round(lim.percent) + '% of its ' + (why === 'weekly' ? 'weekly limit' : '5-hour limit')
   log('early switch: ' + what + '; next is "' + to + '"')
   if (st.mode === 'ask') {
-    vscode.window.showInformationMessage(what + '. Switch to ' + labelOf(to) + ' now, so work doesn\'t stop?', 'Switch Now', 'Not Now')
+    notify('info', what + '. Switch to ' + labelOf(to) + ' now, so work doesn\'t stop?', 'Switch Now', 'Not Now')
       .then((p) => { if (p === 'Switch Now') earlySwitch(live, to, what) }, () => {})
     return
   }
@@ -704,11 +878,11 @@ async function earlySwitch(from, to, what) {
   try {
     try { await switchTo(to, { quiet: true }) } catch (e) { log('early switch: ' + (e && e.message)) }
     if (profilesLib.activeProfile(root()) !== to) {
-      vscode.window.showWarningMessage("Couldn't switch to \"" + labelOf(to) + '" early. ' + what + '.')
+      notify('warn', "Couldn't switch to \"" + labelOf(to) + '" early. ' + what + '.')
       return
     }
-    vscode.window.showInformationMessage('Switched to ' + labelOf(to) + ': ' + what + '. Work carries on from the next message.',
-      'Switch Back').then((p) => { if (p === 'Switch Back') switchTo(from) }, () => {})
+    notify('info', 'Switched to ' + labelOf(to) + ': ' + what + '. Work carries on from the next message.',
+      'Switch Back').then(async (p) => { if (p === 'Switch Back' && (await confirmOrgSwitch(from))) switchTo(from) }, () => {})
   } finally {
     earlyBusy = false
   }
@@ -738,7 +912,7 @@ async function refreshLiveQuietly() {
     if ((usagePausedUntil.get(pauseKey) || 0) > Date.now()) continue
     try {
       const res = await liveLib.fetchUsage(dir)
-      if (res.ok) usageLib.writeLiveCache(root(), dir, res.utilization)
+      if (res.ok) usageLib.writeLiveCache(root(), dir, res.utilization, res.loginExpiresAt)
       else if (res.rateLimited) usagePausedUntil.set(pauseKey, Date.now() + (res.retryAfterMs || DEFAULT_USAGE_PAUSE_MS))
       else log('live usage (update): ' + res.reason)
     } catch (e) { log('live usage (update) failed: ' + (e && e.message)) }
@@ -756,7 +930,7 @@ async function trackerTick(opts) {
     if (trackerManual) {
       const limited = results.filter((r) => r.skipped === 'paused' || r.failed === 'rate-limited').map((r) => r.name)
       if (limited.length) {
-        vscode.window.showInformationMessage('Updated. Anthropic is rate-limiting usage checks for ' +
+        notify('info', 'Updated. Anthropic is rate-limiting usage checks for ' +
           limited.join(', ') + ', so ' +
           (limited.length === 1 ? 'that account shows its' : 'those show their') + ' last figures for now.')
       }
@@ -765,7 +939,7 @@ async function trackerTick(opts) {
       if (r.renewed) log('renewed saved login for "' + r.name + '"')
       else if (r.failed === 'rejected') {
         log('saved login for "' + r.name + '" was rejected; marked sign-in-again')
-        vscode.window.showWarningMessage('The saved login for "' + r.name + '" has expired.',
+        notify('warn', 'The saved login for "' + r.name + '" has expired.',
           'Sign In Again').then((c) => { if (c) relogin(r.name) }, () => {})
       } else if (r.failed) log('tracker: ' + r.name + ' ' + r.failed + (r.reason ? ': ' + r.reason : ''))
     }
@@ -791,7 +965,7 @@ function loginArgs(email) {
 function launchTerminal(title, dir, args) {
   const bin = claude.resolveBin()
   if (!bin) {
-    vscode.window.showErrorMessage("Couldn't find Claude Code's command-line tool (claude). Install Claude Code, or add it to your PATH, and try again.")
+    notify('error', "Couldn't find Claude Code's command-line tool (claude). Install Claude Code, or add it to your PATH, and try again.")
     return null
   }
   if (dir) prepareLoginDir(dir)
@@ -901,7 +1075,7 @@ function trackLogin(name, dir, startedAt, isNew) {
       finishLoginDir(dir)
       if (res.ok) return finalizeLogin(name, dir, res.status, isNew)
       if (res.reason === 'timed out') {
-        vscode.window.showWarningMessage(
+        notify('warn', 
           'Stopped waiting for "' + name + '" after 15 minutes. If you did finish, reload the ' +
           'window and it will be picked up automatically.')
       }
@@ -910,7 +1084,7 @@ function trackLogin(name, dir, startedAt, isNew) {
     .catch((e) => {
       finishLoginDir(dir)
       log('login tracking for ' + name + ' failed: ' + (e && e.stack))
-      vscode.window.showErrorMessage('Claude Accounts: ' + (e && e.message))
+      notify('error', 'Claude Accounts: ' + (e && e.message))
     })
   pendingLogins.add(run)
   run.then(() => pendingLogins.delete(run), () => pendingLogins.delete(run))
@@ -930,14 +1104,14 @@ async function finalizeLogin(name, dir, st, isNew) {
   const dup = profilesLib.findSameAccount(root(), who, name)
   if (dup) {
     const update = 'Update "' + dup + '"'
-    const choice = await vscode.window.showWarningMessage(
+    const choice = await notify('warn', 
       'You signed in as ' + who.email + ', which is already saved as "' + dup + '". ' +
       'Your browser probably reused an account it was already signed in to. ' +
       'Try a private window to sign in to a different one.',
       { modal: true }, update, 'Discard This Login')
     if (choice === update) {
       profilesLib.importFromDir(root(), dup, dir, { move: true, fallback, sameAccountOnly: true, confirmedEmail: st.loggedIn ? st.email : null })
-      vscode.window.showInformationMessage('Refreshed the saved login for "' + dup + '".')
+      notify('info', 'Refreshed the saved login for "' + dup + '".')
     } else {
       try { credstore.remove(dir) } catch (e) { log('discard failed: ' + (e && e.message)) }
     }
@@ -952,13 +1126,13 @@ async function finalizeLogin(name, dir, st, isNew) {
     profilesLib.importFromDir(root(), name, dir, { move: true, fallback, sameAccountOnly: !isNew, confirmedEmail: st.loggedIn ? st.email : null })
   } catch (e) {
     if (e && e.code === 'ENOIDENTITY') {
-      vscode.window.showInformationMessage('"' + name + '" signed in. It will be added as soon as Claude Code has ' +
+      notify('info', '"' + name + '" signed in. It will be added as soon as Claude Code has ' +
         'written its account details, on its own or at the next reload.')
       return
     }
     if (e && e.code === 'EACCOUNTMISMATCH') {
       try { credstore.remove(dir) } catch (e2) { log('discarding wrong login failed: ' + (e2 && e2.message)) }
-      await vscode.window.showWarningMessage(e.message + ' Your browser most likely reused another account: ' +
+      await notify('warn', e.message + ' Your browser most likely reused another account: ' +
         'sign in again from a private window.', { modal: true })
       return
     }
@@ -968,15 +1142,15 @@ async function finalizeLogin(name, dir, st, isNew) {
   if (profilesLib.activeProfile(root()) === name) {
     profilesLib.apply(root(), name)
     refreshAll()
-    vscode.window.showInformationMessage('Signed "' + name + '" in again. Its fresh login is active now.')
+    notify('info', 'Signed "' + name + '" in again. Its fresh login is active now.')
     return
   }
 
   refreshAll()
-  const go = await vscode.window.showInformationMessage(
+  const go = await notify('info', 
     'Added "' + name + '"' + (st.email ? ' (' + st.email + ')' : '') + '. It is in the account switcher now.',
     'Switch to It Now')
-  if (go === 'Switch to It Now') await switchToProfile(name)
+  if (go === 'Switch to It Now' && (await confirmOrgSwitch(name))) await switchToProfile(name)
 }
 
 function syncStagedLogins() {
@@ -1000,7 +1174,7 @@ function syncStagedLogins() {
     const dup = profilesLib.findSameAccount(root(), id, a.name)
     if (dup) {
       log('not importing "' + a.name + '": it is the same account as "' + dup + '"')
-      vscode.window.showWarningMessage('"' + a.name + '" is signed in as ' + id.email +
+      notify('warn', '"' + a.name + '" is signed in as ' + id.email +
         ', which is already saved as "' + dup + '", so it was not added twice.')
       continue
     }
@@ -1030,7 +1204,7 @@ async function addAccount() {
   const canImport = editionLib.hasFeature(edition, 'transfer')
   if (unsaved || canImport) {
     const id = unsaved ? profilesLib.currentIdentity() : null
-    const pick = await vscode.window.showQuickPick([
+    const pick = await ui.pick([
       unsaved ? { label: '$(save) Save the account you are signed in to now', description: (id && id.email) || '', value: 'save' } : null,
       { label: '$(sign-in) Sign in to another account', description: 'opens the Claude login in your browser', value: 'new' },
       canImport ? { label: '$(cloud-download) Import from a move file', description: 'accounts moved here from another PC', value: 'import' } : null,
@@ -1042,47 +1216,14 @@ async function addAccount() {
   return signInNewAccount()
 }
 
-async function signInNewAccount() {
-  const name = await vscode.window.showInputBox({
-    title: 'Add Claude Account',
-    prompt: 'Short name for this account (letters, digits, . _ -)',
-    placeHolder: 'work',
-    validateInput: (v) => {
-      if (!v) return 'Name is required'
-      if (!store.validName(v)) return 'Use 1-32 chars: letters, digits, dot, underscore, hyphen'
-      if (store.readRegistry(root()).accounts.some((a) => a.name === v)) return 'That name already exists'
-      if (profilesLib.exists(root(), v)) return 'That name already exists'
-      return null
-    },
-  })
-  if (!name) return
-
-  let email = await vscode.window.showInputBox({
-    title: 'Add "' + name + '"',
-    prompt: 'Email to pre-fill on the login page (optional)',
-    placeHolder: 'you@example.com',
-    validateInput: (v) => (!v || shell.validEmail(v.trim()) ? null : "That doesn't look like an email address. Leave it empty to type it on the login page."),
-  })
-  if (email === undefined) return
-  email = email.trim()
-
-  const dir = store.addAccount(root(), name)
-  refreshAll()
-
-  const args = loginArgs(email)
-  const startedAt = Date.now()
-  if (!launchTerminal('Claude login: ' + name, dir, args)) return
-  trackLogin(name, dir, startedAt, true)
-}
-
 async function saveCurrentLogin(suggested) {
   if (!profilesLib.hasCurrentLogin()) {
-    vscode.window.showWarningMessage("You're not signed in to Claude Code yet, so there's nothing to save. Sign in first, then try again.")
+    notify('warn', "You're not signed in to Claude Code yet, so there's nothing to save. Sign in first, then try again.")
     return null
   }
   const id = profilesLib.currentIdentity()
   const already = id ? profilesLib.findSameAccount(root(), id, null) : null
-  let name = await vscode.window.showInputBox({
+  let name = await ui.input({
     title: 'Save Current Login',
     prompt: 'Name for the account currently signed in' + (id && id.email ? ' (' + id.email + ')' : ''),
     value: suggested || already || '',
@@ -1099,18 +1240,18 @@ async function saveCurrentLogin(suggested) {
   if (!name) return null
   if (already && name !== already) {
     const update = 'Update "' + already + '"'
-    const choice = await vscode.window.showInformationMessage(
+    const choice = await notify('info', 
       'This account is already saved as "' + labelOf(already) + '". Update that one instead?', { modal: true }, update)
     if (choice !== update) return null
     name = already
   }
   let saved
   try { saved = profilesLib.capture(root(), name) } catch (e) {
-    vscode.window.showWarningMessage('Nothing was saved: ' + (e && e.message))
+    notify('warn', 'Nothing was saved: ' + (e && e.message))
     return null
   }
   refreshAll()
-  vscode.window.showInformationMessage('Saved "' + name + '"' + (saved.email ? ' (' + saved.email + ')' : '') + '.')
+  notify('info', 'Saved "' + name + '"' + (saved.email ? ' (' + saved.email + ')' : '') + '.')
   return name
 }
 
@@ -1135,38 +1276,34 @@ function globalItems() {
 async function pickSaved(placeHolder) {
   const items = globalItems()
   if (!items.length) {
-    vscode.window.showInformationMessage('No saved accounts yet.')
+    notify('info', 'No saved accounts yet.')
     return null
   }
-  const pick = await vscode.window.showQuickPick(items, { placeHolder, matchOnDescription: true })
+  const pick = await ui.pick(items, { placeHolder, matchOnDescription: true })
   return pick ? pick.name : null
-}
-
-async function relogin(nameArg) {
-  const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg)
-    ? nameArg : await pickSaved('Sign in again to which account?')
-  if (!name) return
-  if (!store.readRegistry(root()).accounts.some((a) => a.name === name)) store.addAccount(root(), name)
-  const dir = store.configDir(root(), name)
-  const expected = (profilesLib.readMeta(root(), name) || {}).email
-  const startedAt = Date.now()
-  if (!launchTerminal('Claude login: ' + name, dir, loginArgs(expected))) return
-  trackLogin(name, dir, startedAt, false)
 }
 
 async function forgetAccount(nameArg) {
   const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg)
     ? nameArg : await pickSaved('Forget which saved account?')
   if (!name) return
-  const confirm = await vscode.window.showWarningMessage(
-    'Forget "' + labelOf(name) + '"? This deletes the saved login only. ' +
+  const confirm = await notify('warn', 
+    'Forget "' + labelOf(name) + '"? This deletes its saved login and its pinning login, and unpins its chats and folders. ' +
     'Your chats, and the Claude account itself, are untouched.',
     { modal: true }, 'Forget')
   if (confirm !== 'Forget') return
   profilesLib.remove(root(), name)
+  try {
+    chatPins.forget(root(), name)
+    for (const [folder, n] of Object.entries(store.getPins(root()))) if (n === name) store.setPin(root(), folder, null)
+    await loginsLib.remove(root(), name)
+    await syncPins()
+    repin()
+  } catch (e) { log('pins: ' + e.message) }
   try { store.setArtifacts(root(), name, 'on') } catch (e) { log('artifacts pref: ' + e.message) }
+  writePinnedSettings(name)
   refreshAll()
-  vscode.window.showInformationMessage('Forgot "' + labelOf(name) + '".')
+  notify('info', 'Forgot "' + labelOf(name) + '".')
 }
 
 function editAccount(name, label, icon, color) {
@@ -1189,9 +1326,10 @@ function applyPreferences(name) {
 function setArtifactsFor(name, on) {
   if (!profilesLib.exists(root(), name)) return
   const { applied, warning } = preferencesLib.setArtifactsFor(root(), name, on, { log })
-  if (warning) vscode.window.showWarningMessage('Artifacts: ' + warning)
+  if (warning) notify('warn', 'Artifacts: ' + warning)
+  writePinnedSettings(name)
   refreshAll()
-  vscode.window.showInformationMessage('Artifacts are ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
+  notify('info', 'Artifacts are ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
     (on ? ' where Anthropic offers them' : '') +
     (applied ? '. New chats follow it; restart a running chat to be sure it does.' : '.'))
 }
@@ -1199,10 +1337,36 @@ function setArtifactsFor(name, on) {
 function setRemoteFor(name, on) {
   if (!profilesLib.exists(root(), name)) return
   const { applied, warning } = preferencesLib.setRemoteFor(root(), name, on, { log })
-  if (warning) vscode.window.showWarningMessage('Remote Control: ' + warning)
+  if (warning) notify('warn', 'Remote Control: ' + warning)
+  writePinnedSettings(name)
   refreshAll()
-  vscode.window.showInformationMessage('Remote Control is ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
+  notify('info', 'Remote Control is ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
     (applied ? '. Chats already running keep their current connection until restarted.' : '.'))
+}
+
+function pinnedSettingsFile(name) { return path.join(loginsLib.pinningRoot(root()), name + '.settings.json') }
+
+function writePinnedSettings(name) {
+  if (!store.validName(name)) return
+  const file = pinnedSettingsFile(name)
+  const out = {}
+  if (store.getRemote(root(), name) === 'off') out.disableRemoteControl = true
+  if (editionLib.hasFeature(edition, 'artifacts') && store.getArtifacts(root(), name) === 'off') out.enableArtifact = false
+  try {
+    if (!Object.keys(out).length || !profilesLib.exists(root(), name)) { fs.rmSync(file, { force: true }); return }
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    fsx.writeJsonAtomic(file, out, { mode: 0o600 })
+  } catch (e) { log('pinned chat settings for "' + name + '": ' + (e && e.message)) }
+}
+
+function writePinnedSettingsAll() {
+  for (const p of profilesLib.list(root())) writePinnedSettings(p.name)
+  let names = []
+  try { names = fs.readdirSync(loginsLib.pinningRoot(root())) } catch { return }
+  for (const n of names) {
+    const m = /^(.+)\.settings\.json$/.exec(n)
+    if (m && !profilesLib.exists(root(), m[1])) { try { fs.rmSync(path.join(loginsLib.pinningRoot(root()), n), { force: true }) } catch {  } }
+  }
 }
 
 async function ensureGlobalMode() {
@@ -1224,8 +1388,8 @@ async function resolveMachineConfigDir(modal) {
     const msg = 'Claude Code is set to use CLAUDE_CONFIG_DIR=' + dir + ' in every window (in the ' +
       'claudeCode.environmentVariables setting). While it is set, switching accounts and folder pins have no effect. Clear it?'
     const pick = modal
-      ? await vscode.window.showWarningMessage(msg, { modal: true }, 'Clear It', 'Keep It')
-      : await vscode.window.showWarningMessage(msg, 'Clear It', 'Keep It')
+      ? await notify('warn', msg, { modal: true }, 'Clear It', 'Keep It')
+      : await notify('warn', msg, 'Clear It', 'Keep It')
     if (pick === 'Keep It') {
       if (state) await state.update(CONFIG_DIR_CHOICE, 'keep')
       log('kept the machine-wide CLAUDE_CONFIG_DIR, as asked')
@@ -1242,22 +1406,7 @@ async function resolveMachineConfigDir(modal) {
 async function globalSwitch() {
   await ensureGlobalMode()
   syncStagedLogins()
-
-  const items = globalItems()
-  if (!items.length) {
-    const go = await vscode.window.showInformationMessage(
-      'No saved accounts yet. Save the account you are signed in as now, then add others.',
-      'Save Current Login', 'Open Accounts')
-    if (go === 'Save Current Login') await saveCurrentLogin()
-    if (go === 'Open Accounts') await openAccounts()
-    return
-  }
-  items.push({ label: '$(settings-gear) Manage accounts…', description: 'rename, Remote Control, pins, usage', manage: true })
-  const pick = await vscode.window.showQuickPick(items,
-    { placeHolder: 'Switch Claude to which account?', matchOnDescription: true })
-  if (!pick) return
-  if (pick.manage) return openAccounts()
-  await switchToProfile(pick.name)
+  await openAccounts()
 }
 
 let switchQueue = Promise.resolve()
@@ -1278,13 +1427,13 @@ async function doSwitch(name, opts) {
   const pick = { name }
   let active = profilesLib.activeProfile(root())
   if (active === pick.name) {
-    vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
+    notify('info', 'Already signed in as "' + labelOf(pick.name) + '".')
     return
   }
 
   if (!active && liveLoginUnsaved()) {
     const id = profilesLib.currentIdentity()
-    const choice = await vscode.window.showWarningMessage(
+    const choice = await notify('warn', 
       'The account Claude Code is using now' + (id && id.email ? ' (' + id.email + ')' : '') + " isn't saved in the " +
       'switcher. Switching replaces its login, so save it first if you want to come back to it.',
       { modal: true }, 'Save It First', 'Switch Without Saving')
@@ -1298,22 +1447,22 @@ async function doSwitch(name, opts) {
   try {
     const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, withoutSaving: true })
     if (!res.switched) {
-      vscode.window.showInformationMessage('Already signed in as "' + labelOf(pick.name) + '".')
+      notify('info', 'Already signed in as "' + labelOf(pick.name) + '".')
       return
     }
     applied = res
   } catch (e) {
     const code = e && e.code
-    if (code === 'BUSY') vscode.window.showErrorMessage('Switch cancelled: a background login renewal did not finish. Try again in a minute.')
-    else if (code === 'MOVING') vscode.window.showErrorMessage('Switch cancelled: the live account kept changing in another window. Try again.')
+    if (code === 'BUSY') notify('error', 'Switch cancelled: a background login renewal did not finish. Try again in a minute.')
+    else if (code === 'MOVING') notify('error', 'Switch cancelled: the live account kept changing in another window. Try again.')
     else if (code === 'CAPTURE') {
       const why = e.cause && e.cause.message
       log('pre-switch capture of "' + e.account + '" failed: ' + why)
-      vscode.window.showErrorMessage('Switch cancelled: the login Claude Code is using now couldn\'t be saved to "' +
+      notify('error', 'Switch cancelled: the login Claude Code is using now couldn\'t be saved to "' +
         labelOf(e.account) + '" first. ' + why + ' Nothing was changed.')
     } else {
       const why = String((e && e.message) || 'something went wrong').replace(/\.?$/, '.')
-      vscode.window.showErrorMessage('Switch failed: ' + why + (code === 'ENOIDENTITY' ? '' : ' Your previous login is still in place.'))
+      notify('error', 'Switch failed: ' + why + (code === 'ENOIDENTITY' ? '' : ' Your previous login is still in place.'))
     }
     return
   }
@@ -1325,37 +1474,32 @@ async function doSwitch(name, opts) {
   refreshAll()
 
   if (st.ok && !st.loggedIn) {
-    vscode.window.showWarningMessage('Switched to "' + labelOf(pick.name) + '" but it reports signed out. ' +
+    notify('warn', 'Switched to "' + labelOf(pick.name) + '" but it reports signed out. ' +
       'Its saved login may have expired.', 'Sign In Again').then((c) => { if (c) relogin(pick.name) }, () => {})
     return
   }
 
   const who = (st.ok && st.email) || applied.email || pick.name
   if (pinnedHere()) {
-    vscode.window.showInformationMessage('Other windows now use ' + who + '. This window stays on ' +
+    notify('info', 'Other windows now use ' + who + '. This window stays on ' +
       labelOf(pinState.name) + ' because its folder is pinned.')
     return
   }
   if (quiet) return
-  vscode.window.showInformationMessage('Now signed in as ' + who + '. Your chats and history are untouched, ' +
+  notify('info', 'Now signed in as ' + who + '. Your chats and history are untouched, ' +
     'and open chats use it from their next message.')
 }
 
 function accountItems(current) {
   return profilesLib.list(root()).sort(byLabel).map((p) => ({
     label: (p.name === current ? '$(pin) ' : '$(blank) ') + labelOf(p.name),
-    description: [p.email, windowsLib.hasLogin(root(), p.name) ? 'window login ready' : 'needs a one-time sign-in']
+    description: [p.email, pinningReady(p.name) ? 'pinning login: ' + daysPhrase(pinningOf(p.name).expiresAt) + ' left' : 'needs a pinning login (one more sign-in)']
       .filter(Boolean).join('  ·  '),
     name: p.name,
   }))
 }
 
-async function offerReload(message) {
-  const choice = await vscode.window.showInformationMessage(message, 'Reload Window', 'Later')
-  if (choice === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow')
-}
-
-async function pinFolder() {
+async function pinFolder(preset) {
   await ensureGlobalMode()
   const here = firstFolder()
   const herePin = here ? store.getPin(root(), here) : null
@@ -1364,10 +1508,10 @@ async function pinFolder() {
   if (here) {
     const choices = [
       { label: '$(folder) This folder', description: path.basename(here) + (herePin ? '  ·  pinned to ' + labelOf(herePin) : ''), value: 'here' },
-      { label: '$(folder-opened) Another folder…', description: 'opens it in a new window', value: 'other' },
+      { label: '$(folder-opened) Another folder…', description: 'any window on it follows the pin', value: 'other' },
     ]
     if (herePin) choices.push({ label: '$(close) Unpin this folder', description: 'back to the global account', value: 'unpin' })
-    const pick = await vscode.window.showQuickPick(choices, { placeHolder: 'Pin which folder?' })
+    const pick = await ui.pick(choices, { placeHolder: 'Pin which folder?' })
     if (!pick) return
     mode = pick.value
   }
@@ -1387,89 +1531,1117 @@ async function pinFolder() {
   const current = store.getPin(root(), target)
   const items = accountItems(current)
   if (!items.length) {
-    vscode.window.showInformationMessage('No saved accounts yet. Add one first.')
+    notify('info', 'No saved accounts yet. Add one first.')
     return
   }
-  const pick = await vscode.window.showQuickPick(items,
-    { placeHolder: 'Run "' + path.basename(target) + '" as which account?' })
+  const pick = typeof preset === 'string' && profilesLib.exists(root(), preset) ? { name: preset }
+    : await ui.pick(items, { placeHolder: 'Run "' + path.basename(target) + '" as which account?' })
   if (!pick) return
   if (mode === 'here' && pick.name === current && pinnedHere()) {
-    vscode.window.showInformationMessage('This folder is already pinned to that account.')
+    notify('info', 'This folder is already pinned to that account.')
     return
   }
-  if (!windowsLib.hasLogin(root(), pick.name) && !(await windowLogin(pick.name))) return
+  if (!(await ensurePinning(pick.name))) return
   store.setPin(root(), target, pick.name)
-  refreshAll()
+  repin()
+  notify('info', '"' + path.basename(target) + '" is pinned to ' + labelOf(pick.name) +
+    '. New chats there run on its pinning login now; chats already open move to it when you reopen them.')
+  log('pinned "' + target + '" to ' + pick.name)
+}
 
-  if (mode === 'here') {
-    await offerReload('"' + path.basename(target) + '" is pinned to ' + labelOf(pick.name) +
-      '. Reload the window to start using it. A prompt still running in this window would be interrupted.')
+let wrapperPath = null
+let foreignWrapperWarned = false
+
+async function syncPins() {
+  let count = 0
+  try {
+    const folders = Object.entries(store.getPins(root())).map(([folder, name]) => ({ folder, name }))
+    count = chatPins.writeWrapperFile(root(), folders, (n) => loginsLib.wrapperLogin(root(), n))
+  } catch (e) { log('pins: writing the wrapper\'s list: ' + (e && e.message)) }
+  return syncWrapper(count > 0)
+}
+
+async function syncWrapper(any) {
+  if (!wrapperPath) return false
+  const cfg = vscode.workspace.getConfiguration('claudeCode')
+  const current = cfg.get('claudeProcessWrapper')
+  const act = chatPins.wrapperAction(current, wrapperPath, any)
+  try {
+    if (act === 'on') await cfg.update('claudeProcessWrapper', wrapperPath, vscode.ConfigurationTarget.Global)
+    if (act === 'off') await cfg.update('claudeProcessWrapper', undefined, vscode.ConfigurationTarget.Global)
+  } catch (e) { log('chat pins: wrapper setting: ' + (e && e.message)); return false }
+  if (act === 'foreign' && any && !foreignWrapperWarned) {
+    foreignWrapperWarned = true
+    notify('warn', 'Pins need Claude Code\'s "Claude Process Wrapper" setting, which is already set to ' +
+      'another program, so pinned chats and folders run as the window\'s account. Clear that setting to use pins.')
+  }
+  return act !== 'foreign'
+}
+
+function daysPhrase(expiresAt) {
+  if (typeof expiresAt !== 'number') return 'unknown'
+  const ms = expiresAt - Date.now()
+  if (ms <= 0) return 'ended'
+  if (ms < DAY_MS) { const h = Math.max(1, Math.floor(ms / 3600000)); return h + (h === 1 ? ' hour' : ' hours') }
+  const d = Math.floor(ms / DAY_MS)
+  return d + (d === 1 ? ' day' : ' days')
+}
+
+function daysWords(expiresAt) {
+  const when = new Date(expiresAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+  return expiresAt <= Date.now() ? 'ended on ' + when : daysPhrase(expiresAt) + ' left (until ' + when + ')'
+}
+
+const DAY_MS = 86400000
+
+function mainEndOf(name) {
+  return loginExpiryOf(name, null, name === profilesLib.activeProfile(root()))
+}
+
+function usesPinning(name) {
+  if (pinningOf(name)) return true
+  if (Object.values(store.getPins(root())).includes(name)) return true
+  return chatPins.read(root()).some((p) => p.name === name)
+}
+
+function signinBin() {
+  let b = null
+  try { b = claude.resolveBin() } catch { b = null }
+  if (b && (process.platform !== 'win32' || /\.exe$/i.test(b))) return b
+  try { return claude.bundled(os.homedir(), claudeExtPath ? [claudeExtPath] : []).find((c) => fs.existsSync(c)) || null } catch { return null }
+}
+let claudeExtPath = null
+
+let signinStart = (o) => signinLib.start(o)
+const signinCodes = new Map()
+
+function newSigninDir() {
+  const dir = path.join(root(), 'accounts', '.signin-' + require('crypto').randomBytes(6).toString('hex'))
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
+}
+
+let signinDropRetryMs = [6000, 30000]
+function dropSigninDir(dir, attempt) {
+  if (!dir || !path.basename(dir).startsWith('.signin-')) return
+  try { credstore.remove(dir) } catch (e) { log('sign-in folder: ' + (e && e.message)) }
+  try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) {
+    const n = attempt || 0
+    if (n < signinDropRetryMs.length) { setTimeout(() => dropSigninDir(dir, n + 1), signinDropRetryMs[n]).unref(); return }
+    log('sign-in folder, left for the next start: ' + (e && e.message))
+  }
+}
+
+function cleanupSigninDirs() {
+  const base = path.join(root(), 'accounts')
+  let names = []
+  try { names = fs.readdirSync(base) } catch { return }
+  for (const n of names) {
+    if (!n.startsWith('.signin-')) continue
+    const dir = path.join(base, n)
+    if (!signinLib.isPending(dir)) dropSigninDir(dir)
+  }
+}
+
+async function signIn(purpose, name) {
+  const bin = signinBin()
+  if (!bin) {
+    notify('warn', 'Claude Code\'s program wasn\'t found, so the sign-in can\'t start. Install or update the Claude Code extension, then try again.')
+    return null
+  }
+  const label = name ? labelOf(name) : null
+  const email = name ? (profilesLib.readMeta(root(), name) || {}).email || null : null
+  let spec = {
+    kind: 'signin', title: 'Finish signing in on the browser', url: '', email, stage: 'waiting', error: null,
+    beta: purpose === 'pinning', confirmLabel: purpose === 'relogin' ? 'Sign in' : 'Add account',
+    message: purpose === 'pinning' ? 'Your browser opened the Claude sign-in page, to sign ' + label + ' in once more for pinning.'
+      : purpose === 'relogin' ? 'Your browser opened the Claude sign-in page, to sign ' + label + ' in again.'
+        : 'Your browser opened the Claude sign-in page. Sign in there and this finishes by itself.',
+  }
+  const q = openAsk(spec)
+  let handle = null
+  let over = false
+  q.answer.then(() => { if (!over) { over = true; if (handle) handle.cancel() } })
+  const dir = newSigninDir()
+  try {
+    for (;;) {
+      let codeSent = false
+      handle = signinStart({ bin, configDir: dir, email, log: (m) => log('sign-in: ' + m) })
+      signinCodes.set(q.id, (code) => {
+        codeSent = true
+        spec = Object.assign({}, spec, { stage: 'checking', error: null })
+        updateAsk(q.id, spec)
+        handle.sendCode(code)
+      })
+      handle.url.then((u) => { if (u && !over) { spec = Object.assign({}, spec, { url: u }); updateAsk(q.id, spec) } }, () => {})
+      if (over) handle.cancel()
+      const r = await handle.done
+      if (over) { dropSigninDir(dir); return null }
+      if (r && r.ok) {
+        over = true
+        endAsk(q.id, undefined)
+        withIdentity(dir, r.email)
+        return { dir, email: r.email || null, accountUuid: r.accountUuid || null }
+      }
+      if (codeSent && r && r.reason === 'exited') {
+        spec = Object.assign({}, spec, { stage: 'waiting', url: '',
+          error: 'That code didn\'t work. Copy it again from the browser page and paste it here.' })
+        updateAsk(q.id, spec)
+        continue
+      }
+      over = true
+      endAsk(q.id, undefined)
+      dropSigninDir(dir)
+      notify('warn', r && r.reason === 'timed out' ? 'The sign-in took too long and was stopped. Try again when you\'re ready.'
+        : 'The sign-in stopped before it finished' + (r && r.detail ? ' (' + r.detail + ')' : '') + '. Try again.')
+      return null
+    }
+  } catch (e) {
+    over = true
+    endAsk(q.id, undefined)
+    dropSigninDir(dir)
+    throw e
+  } finally {
+    signinCodes.delete(q.id)
+  }
+}
+
+function withIdentity(dir, email) {
+  const cfg = path.join(dir, '.claude.json')
+  const j = fsx.readJsonLoose(cfg, null) || {}
+  if (j.oauthAccount && typeof j.oauthAccount === 'object') return
+  if (!email) return
+  try { fsx.writeJsonAtomic(cfg, Object.assign({}, j, { oauthAccount: { emailAddress: email } }), { mode: 0o600 }) } catch (e) { log('sign-in identity: ' + (e && e.message)) }
+}
+
+function newAccountName(label, email) {
+  const from = String(label || String(email || '').split('@')[0] || 'account')
+  let base = from.toLowerCase().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 28).replace(/\.settings$/, '-settings') || 'account'
+  if (!store.validName(base)) base = 'account'
+  const taken = (n) => profilesLib.exists(root(), n) || store.readRegistry(root()).accounts.some((a) => a.name === n)
+  if (!taken(base)) return base
+  for (let i = 2; i < 1000; i++) if (!taken(base + '-' + i)) return base + '-' + i
+  return base + '-' + Date.now()
+}
+
+function labelFromEmail(email) {
+  const s = String(email || '').split('@')[0].replace(/[._-]+/g, ' ').trim()
+  return s ? (s[0].toUpperCase() + s.slice(1)).slice(0, 40) : 'Account'
+}
+
+async function signInNewAccount() {
+  const look = await ui.account({ title: 'Add an account', prompt: 'How it looks in VS Code. You can change it any time.' })
+  if (!look) return
+  const s = await signIn('add', null)
+  if (!s) return
+  const who = { email: s.email, accountUuid: s.accountUuid }
+  const known = profilesLib.findSameAccount(root(), who, null)
+  if (known) return alreadySaved(known, s, {})
+  let name
+  try {
+    name = newAccountName(look.label, s.email)
+    profilesLib.importFromDir(root(), name, s.dir, { move: true, confirmedEmail: s.email })
+  } catch (e) {
+    notify('warn', 'The account couldn\'t be added: ' + (e && e.message))
+    return
+  } finally { dropSigninDir(s.dir) }
+  editAccount(name, look.label || labelFromEmail(s.email), look.icon, look.color)
+  log('added "' + name + '"')
+  refreshAll()
+  return addedNew(name)
+}
+
+async function addedNew(name) {
+  const m = profilesLib.readMeta(root(), name) || {}
+  const offer = prefOf('askSecondLogin')
+  const v = await ui.ask({ kind: 'confirm', art: 'success', title: 'Your account has been successfully added',
+    facts: [['Email', m.email || 'unknown'], ['Organisation', m.org || 'Personal account'], ['Plan', profilesLib.planName(m.plan) || 'unknown'],
+      ['Days left', daysPhrase(mainEndOf(name))]],
+    sections: offer ? [{ title: 'Add a second login?', text: 'Switcher supports pinning individual chats and folders to specific accounts but this feature requires another login.' }] : [],
+    check: offer ? { label: 'Don\'t ask again', checked: false } : null,
+    buttons: offer ? ['No thank you', 'Add account for pinning'] : ['Done'], betaButtons: ['Add account for pinning'], cancel: false })
+  if (v && v.checked === true) await setPref('askSecondLogin', false)
+  if (v && v.value === 'Add account for pinning') return addPinning(name)
+}
+
+async function alreadySaved(name, s, o) {
+  const prevEnd = mainEndOf(name)
+  const prevOk = typeof prevEnd === 'number' && prevEnd > Date.now()
+  let r
+  try {
+    await clearHeldFirst(name)
+    r = await loginsLib.adoptNewLogin(root(), name, s.dir, { mode: 'main-keep-old-for-pinning', confirmedEmail: s.email })
+  } finally { dropSigninDir(s.dir) }
+  if (!r || !r.ok) { notify('warn', 'The new login for ' + labelOf(name) + ' couldn\'t be kept (' + ((r && r.reason) || 'unknown') + '). Try again.'); return }
+  const fresh = r.main && r.main.expiresAt
+  let title
+  let message
+  let warning = null
+  const moved = r.kept === 'old-main'
+  if (moved) {
+    title = 'Account added for pinning!'
+    message = 'This account was already logged in so we\'ve renewed your account validity from ' + daysPhrase(prevEnd) + ' to ~' +
+      daysPhrase(fresh) + ', and your previous login is now available for pinning chats (valid for ~' + daysPhrase(prevEnd) + ').'
+    if (prevEnd - Date.now() < 3 * DAY_MS) {
+      warning = 'Heads-up: that previous login ends in ' + daysPhrase(prevEnd) + ', so pinned chats will need a new pinning login soon. We\'ll remind you before then.'
+    }
+  } else if (prevOk) {
+    title = 'Account renewed'
+    message = 'This account was already logged in so we\'ve renewed your account validity from ' + daysPhrase(prevEnd) + ' to ~' +
+      daysPhrase(fresh) + '. Its pinning login already lasts longer than the previous login, so it stays as it is (valid for ~' +
+      daysPhrase(r.pinning && r.pinning.expiresAt) + ').'
+  } else {
+    title = 'Account signed in again'
+    message = 'This account was already saved, but its login had ended. It\'s signed in again now, valid for ~' + daysPhrase(fresh) + '.'
+  }
+  afterLoginChange()
+  const pinOk = pinningReady(name)
+  const v = await ui.ask({ kind: 'confirm', art: moved ? 'pin' : 'success', title, message: (o.intro ? o.intro + ' ' : '') + message, warning,
+    buttons: ['Add another account', pinOk ? 'Done' : 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+  if (!v) return
+  if (v.value === 'Add another account') return addAccount()
+  if (v.value === 'Add account for pinning') return addPinning(name)
+}
+
+async function addPinning(nameArg, opts) {
+  const o = opts || {}
+  let name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg) ? nameArg : null
+  if (!name) {
+    const pk = await ui.pick(accountItems(null), { title: 'Add account for pinning', placeHolder: 'A second login for which account?' })
+    if (!pk) return false
+    name = pk.name
+  }
+  const s = await signIn('pinning', name)
+  if (!s) return false
+  const who = { email: s.email, accountUuid: s.accountUuid }
+  const mine = profilesLib.savedWho(root(), name)
+  if (!mine || profilesLib.sameAccount(mine, who)) {
+    const mainEnd = mainEndOf(name)
+    let r
+    try {
+      await clearHeldFirst(name)
+      r = await loginsLib.adoptNewLogin(root(), name, s.dir, { mode: 'pinning', confirmedEmail: s.email })
+    } catch (e) {
+      dropSigninDir(s.dir)
+      throw e
+    }
+    dropSigninDir(s.dir)
+    if (!r || !r.ok) { notify('warn', 'The pinning login couldn\'t be kept (' + ((r && r.reason) || 'unknown') + '). Try again.'); return false }
+    const fresh = r.pinning && r.pinning.expiresAt
+    const outlasts = typeof mainEnd === 'number' && mainEnd > Date.now() && fresh > mainEnd
+    afterLoginChange()
+    const v = await ui.ask({ kind: 'confirm', art: 'pin', title: 'Account added for pinning!', beta: true,
+      message: 'Congratulations! ' + labelOf(name) + ' can now pin chats and folders. They run on a login of their own, so they never sign out your other chats.',
+      check: outlasts ? { label: 'Use this login to keep main login active?', checked: true,
+        help: 'Your main login ends in ' + daysPhrase(mainEnd) + '. Ticking this makes the new login your main one (' + daysPhrase(fresh) +
+          ') and uses the current main login for pinning until it ends. Nothing else changes.' } : null,
+      buttons: o.midFlow ? ['Continue'] : ['Add another account', 'Done'], cancel: false })
+    if (outlasts && (v ? v.checked !== false : true)) {
+      const x = await loginsLib.exchange(root(), name, { active: name === profilesLib.activeProfile(root()) })
+      if (!x.ok) log('pinning: keeping main active: exchange said ' + x.reason)
+      afterLoginChange()
+    }
+    if (!o.midFlow && v && v.value === 'Add another account') addAccount().catch((e) => log('add: ' + (e && e.message)))
+    return true
+  }
+  const other = profilesLib.findSameAccount(root(), who, null)
+  if (other) {
+    await alreadySaved(other, s, { intro: 'You signed in as ' + (s.email || 'another account') + ', which is ' + labelOf(other) + ', not ' +
+      labelOf(name) + ', so this login went to ' + labelOf(other) + '.' })
+    return false
+  }
+  let b
+  try {
+    b = newAccountName(null, s.email)
+    profilesLib.importFromDir(root(), b, s.dir, { move: true, confirmedEmail: s.email })
+  } finally { dropSigninDir(s.dir) }
+  editAccount(b, labelFromEmail(s.email))
+  refreshAll()
+  const v = await ui.ask({ kind: 'confirm', art: 'success', title: 'A second account was added',
+    message: 'You signed in as ' + s.email + ', which isn\'t ' + labelOf(name) + ' (' + (mine.email || 'its email') + '), so it\'s been added as an account of its own. ' +
+      'To add a pinning login for ' + labelOf(name) + ', sign in as ' + (mine.email || 'that account') + ' instead; a private browser window helps.',
+    field: { label: 'Name', value: labelOf(b) }, buttons: ['Done', 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+  if (v && typeof v.text === 'string' && v.text.trim()) editAccount(b, v.text.trim().slice(0, 40))
+  if (v && v.value === 'Add account for pinning') addPinning(b).catch((e) => log('pinning: ' + (e && e.message)))
+  return false
+}
+
+async function ensurePinning(name) {
+  if (!profilesLib.exists(root(), name)) return false
+  if (pinningReady(name)) return true
+  return addPinning(name, { midFlow: true })
+}
+
+async function relogin(nameArg, which) {
+  const name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg)
+    ? nameArg : await pickSaved('Sign in again to which account?')
+  if (!name) return
+  if (which === 'pinning') return addPinning(name)
+  const s = await signIn('relogin', name)
+  if (!s) return
+  const mine = profilesLib.savedWho(root(), name)
+  const who = { email: s.email, accountUuid: s.accountUuid }
+  if (mine && !profilesLib.sameAccount(mine, who)) {
+    const known = profilesLib.findSameAccount(root(), who, null)
+    const v = await ui.ask({ kind: 'confirm', art: 'warn', title: 'That\'s a different account',
+      message: 'You signed in as ' + (s.email || 'another account') + ', not ' + (mine.email || labelOf(name)) + ' (' + labelOf(name) + '), so ' +
+        labelOf(name) + ' wasn\'t changed. Your browser probably reused an account it was already signed in to; a private window helps.',
+      buttons: [known ? null : 'Add it as its own account', 'Try again'].filter(Boolean) })
+    if (v && v.value === 'Add it as its own account') {
+      let b
+      try {
+        b = newAccountName(null, s.email)
+        profilesLib.importFromDir(root(), b, s.dir, { move: true, confirmedEmail: s.email })
+      } finally { dropSigninDir(s.dir) }
+      editAccount(b, labelFromEmail(s.email))
+      refreshAll()
+      return addedNew(b)
+    }
+    dropSigninDir(s.dir)
+    if (v && v.value === 'Try again') return relogin(name)
     return
   }
-  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target), { forceNewWindow: true })
-  log('opened "' + target + '" pinned to ' + pick.name)
+  const prevEnd = mainEndOf(name)
+  const pin = pinningOf(name)
+  const keepOld = usesPinning(name) && typeof prevEnd === 'number' && prevEnd > Date.now() && (!pin || pin.expiresAt <= Date.now() || prevEnd > pin.expiresAt)
+  let r
+  try {
+    if (keepOld) await clearHeldFirst(name)
+    r = await loginsLib.adoptNewLogin(root(), name, s.dir, { mode: keepOld ? 'main-keep-old-for-pinning' : 'main-only', confirmedEmail: s.email })
+  } finally { dropSigninDir(s.dir) }
+  if (!r || !r.ok) { notify('warn', labelOf(name) + ' couldn\'t be signed in again (' + ((r && r.reason) || 'unknown') + '). Try again.'); return }
+  afterLoginChange()
+  const moved = r.kept === 'old-main'
+  notify('info', labelOf(name) + ' is signed in again. Its main login is good for about ' + daysPhrase(r.main && r.main.expiresAt) + ' now.' +
+    (moved ? ' Its previous login now keeps its pinned chats and folders going for about ' + daysPhrase(prevEnd) + '.' : ''))
+}
+
+function afterLoginChange() {
+  repin()
+  scheduleLoginWatch()
+}
+
+const LOGIN_WATCH_MS = 5 * 60 * 1000
+const LOGIN_WATCH_LOCK = 'login-watch'
+let loginWatchTimer = null
+let loginWatchSoon = null
+let loginWatchRunning = false
+const remindersOpen = new Set()
+const endsNoted = new Set()
+
+function scheduleLoginWatch() {
+  if (loginWatchSoon) return
+  loginWatchSoon = setTimeout(() => { loginWatchSoon = null; loginWatch().catch((e) => log('login watch: ' + (e && e.message))) }, 1500)
+}
+
+function busySessions() {
+  const out = new Set()
+  const dir = path.join(windowsLib.claudeDir(), 'sessions')
+  let names = []
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')) } catch { return out }
+  for (const n of names) {
+    const j = fsx.readJsonLoose(path.join(dir, n), null)
+    if (!j || j.status !== 'busy' || typeof j.sessionId !== 'string') continue
+    const pid = Number.isInteger(j.pid) ? j.pid : parseInt(n, 10)
+    if (Number.isInteger(pid) && pid > 0 && fsx.pidAlive(pid)) out.add(j.sessionId)
+  }
+  return out
+}
+
+function accountBusy(name, busy) {
+  if (!busy.size) return false
+  if (name === profilesLib.activeProfile(root())) return true
+  let inUse = []
+  try { inUse = loginsLib.listInUse(root(), name) } catch { inUse = [] }
+  return inUse.some((u) => !u.sessionId || busy.has(u.sessionId))
+}
+
+function loginPairs() {
+  return profilesLib.list(root()).map((p) => {
+    const end = mainEndOf(p.name)
+    return { name: p.name, main: typeof end === 'number' ? { expiresAt: end } : null, pinning: pinningOf(p.name) }
+  })
+}
+
+async function loginWatch() {
+  if (loginWatchRunning) return
+  loginWatchRunning = true
+  const release = locksLib.tryAcquire(root(), LOGIN_WATCH_LOCK, 2 * 60 * 1000)
+  try {
+    await settleWaitingChats()
+    if (!release) return
+    const busy = busySessions()
+    const now = Date.now()
+    for (const a of loginPairs()) {
+      if (!a.pinning) continue
+      const d = loginsLib.decideExchange({ now, main: a.main, pinning: a.pinning, busy: accountBusy(a.name, busy) })
+      if (d === 'exchange') await lastDayExchange(a.name)
+      else if (d === 'wait' && a.main && a.main.expiresAt <= now && !endsNoted.has(a.name + '|main|' + a.main.expiresAt)) {
+        endsNoted.add(a.name + '|main|' + a.main.expiresAt)
+        notify('warn', labelOf(a.name) + '\'s main login has ended. Its pinning login takes over as soon as no chat on ' + labelOf(a.name) +
+          ' is replying, or you can sign in again now.', 'Sign in again', 'Not now')
+          .then((b) => { if (b === 'Sign in again') return relogin(a.name) }, () => {})
+      }
+    }
+    remindAll()
+  } finally {
+    if (release) release()
+    loginWatchRunning = false
+  }
+}
+
+async function lastDayExchange(name) {
+  const active = name === profilesLib.activeProfile(root())
+  const mainEnd = mainEndOf(name)
+  if (typeof mainEnd === 'number' && mainEnd <= Date.now()) return pinningTakesOver(name, active)
+  const x = await loginsLib.exchange(root(), name, { active })
+  if (!x.ok) { log('last-day exchange for "' + name + '": ' + x.reason); return }
+  log('last-day exchange for "' + name + '"')
+  try {
+    let st = loginsLib.readReminderState(root())
+    for (const kind of ['3-days', 'last-day']) {
+      st = loginsLib.answerReminder(st, { key: name + '|pinning|' + x.pinning.expiresAt + '|' + kind }, {})
+    }
+    loginsLib.writeReminderState(root(), st)
+  } catch (e) { log('reminders: ' + (e && e.message)) }
+  afterLoginChange()
+  const label = labelOf(name)
+  notify('info', label + '\'s main login was on its last day, so it quietly swapped places with its pinning login. The main login now has ' +
+    daysPhrase(x.main.expiresAt) + ' left, and the old one keeps pinned chats going for its last ' + daysPhrase(x.pinning.expiresAt) +
+    '. Add a new pinning login so pinning carries on after that.', 'Add account for pinning', 'Not now')
+    .then((b) => { if (b === 'Add account for pinning') return addPinning(name) }, () => {})
+}
+
+async function pinningTakesOver(name, active) {
+  const x = await loginsLib.exchange(root(), name, { active, retire: true })
+  if (!x.ok) { log('pinning login taking over as main for "' + name + '": ' + x.reason); return }
+  log('pinning login of "' + name + '" took over as its main login; main had ended')
+  afterLoginChange()
+  const label = labelOf(name)
+  notify('info', label + '\'s main login had ended, so its pinning login is now the main login, good for about ' + daysPhrase(x.main.expiresAt) +
+    '. ' + label + ' needs a new pinning login: until you add one, its pinned chats and folders start on the active account.',
+    'Add account for pinning', 'Not now')
+    .then((b) => { if (b === 'Add account for pinning') return addPinning(name) }, () => {})
+}
+
+function remindAll() {
+  let st
+  try { st = loginsLib.readReminderState(root()) } catch (e) { log('reminders: ' + (e && e.message)); return }
+  const pinned = (n) => Object.values(store.getPins(root())).includes(n) || chatPins.read(root()).some((p) => p.name === n)
+  const due = loginsLib.dueReminders({ now: Date.now(), accounts: loginPairs(), state: st })
+    .filter((r) => !remindersOpen.has(r.key) && (r.which === 'main' || pinned(r.name)))
+    .filter((r) => !(r.which === 'main' && r.kind === 'expired' && endsNoted.has(r.name + '|main|' + mainEndOf(r.name))))
+  if (!due.length) return
+  for (const r of due) st = loginsLib.answerReminder(st, r, { notNow: true })
+  try { loginsLib.writeReminderState(root(), st) } catch (e) { log('reminders: ' + (e && e.message)); return }
+  for (const r of due) showReminder(r)
+}
+
+function reminderText(r) {
+  const label = labelOf(r.name)
+  const end = r.which === 'main' ? mainEndOf(r.name) : (pinningOf(r.name) || {}).expiresAt
+  const when = r.kind === 'expired' ? 'has ended'
+    : 'ends in ' + daysPhrase(end) + ', ' + (r.kind === 'last-day'
+      ? 'at ' + new Date(end).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      : 'on ' + new Date(end).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }))
+  return r.which === 'main'
+    ? label + '\'s main login ' + when + '. Sign in again to renew it for about 30 days: it takes a minute in your browser, and nothing else changes.'
+    : label + '\'s pinning login ' + when + '. After that its pinned chats and folders start on the active account. Sign in again to keep them on ' + label + '.'
+}
+
+function showReminder(r) {
+  remindersOpen.add(r.key)
+  notify(r.kind === '3-days' ? 'info' : 'warn', reminderText(r), 'Sign in again', 'Not now', 'Don\'t ask again').then((b) => {
+    remindersOpen.delete(r.key)
+    if (b === 'Sign in again' || b === 'Don\'t ask again') {
+      try { loginsLib.writeReminderState(root(), loginsLib.answerReminder(loginsLib.readReminderState(root()), r, {})) } catch (e) { log('reminders: ' + (e && e.message)) }
+    }
+    if (b === 'Sign in again') return r.which === 'main' ? relogin(r.name) : addPinning(r.name)
+  }, () => remindersOpen.delete(r.key))
+}
+
+async function startupLogins() {
+  try { await loginsLib.recover(root()) } catch (e) { log('logins: recover: ' + (e && e.message)) }
+  try {
+    const own = windowPinnedDir()
+    const done = await loginsLib.migrateWindowLogins(root(), Date.now(), {
+      skip: (name) => (own && windowsLib.nameForDir(root(), own) === name) || windowStillOpen(name),
+    })
+    for (const r of done) {
+      if (r.moved || r.removed) log('1.3 window login "' + r.name + '": ' + (r.moved ? 'now its pinning login' : 'removed'))
+      if (r.error) log('1.3 window login "' + r.name + '": its old folder is left for the next start: ' + r.error)
+      else if (!r.moved && !r.removed && r.reason) log('1.3 window login "' + r.name + '": left for now (' + (r.reason === 'skipped' ? 'its window may still be open' : r.reason) + ')')
+    }
+    if (done.some((r) => r.moved || r.removed)) afterLoginChange()
+  } catch (e) { log('logins: migrate: ' + (e && e.message)) }
+  try { askAboutHeldLogins() } catch (e) { log('held logins: ' + (e && e.message)) }
+}
+
+function windowStillOpen(name) {
+  let dir
+  try { dir = windowsLib.windowDir(root(), name) } catch { return false }
+  const live = (sub, ext, pidFromName) => {
+    const d = path.join(dir, sub)
+    if (windowsLib.isLink(d)) return false
+    let names = []
+    try { names = fs.readdirSync(d).filter((n) => n.endsWith(ext)) } catch { return false }
+    return names.some((n) => {
+      const j = fsx.readJsonLoose(path.join(d, n), null)
+      const pid = j && Number.isInteger(j.pid) ? j.pid : pidFromName ? parseInt(n, 10) : NaN
+      return Number.isInteger(pid) && pid > 0 && fsx.pidAlive(pid)
+    })
+  }
+  return live('ide', '.lock', false) || live('sessions', '.json', true)
+}
+
+const LOGIN_CHANGE_MS = loginsLib.loginCheckMs(process.platform)
+const WAITING_CHECK_MS = 5000
+let lastLoginCheck = 0
+let identityWaitMs = 10000
+const loginStamps = new Map()
+let loginChangeRunning = false
+const oauthRt = (c) => (c && c.claudeAiOauth && c.claudeAiOauth.refreshToken) || null
+
+function loginStoreChanged(key, dir) {
+  let st = null
+  try { st = credstore.stat(dir) } catch { return false }
+  const ms = st && st.exists ? (st.modifiedMs || 0) : -1
+  if (loginStamps.get(key) === ms) return false
+  loginStamps.set(key, ms)
+  return ms !== -1
+}
+
+async function fastTick() {
+  if (waitingChats.size || takeouts.size) await settleWaitingChats()
+  if (Date.now() - lastLoginCheck < LOGIN_CHANGE_MS - 500) return
+  lastLoginCheck = Date.now()
+  await loginChangeTick()
+}
+
+async function loginChangeTick() {
+  if (loginChangeRunning) return
+  loginChangeRunning = true
+  try {
+    if (loginStoreChanged('', null)) await claudeLoginCheck()
+    for (const name of loginsLib.names(root())) {
+      if (loginStoreChanged(name, loginsLib.dirFor(root(), name))) await pinnedLoginCheck(name)
+    }
+    lastActive = profilesLib.activeProfile(root())
+  } finally { loginChangeRunning = false }
+}
+
+function lockAccount(name) {
+  return locksLib.acquire(root(), trackerLib.accountLock(name), { waitMs: 45000, staleMs: trackerLib.LOCK_STALE_MS })
+}
+const heldLock = async () => () => {}
+
+async function claudeLoginCheck() {
+  let snap = profilesLib.liveSnapshot()
+  const end = profilesLib.loginExpiresAt(snap.credentials)
+  if (!snap.refreshToken || !end) return
+  const name = profilesLib.findSameAccount(root(), snap, null)
+  if (!name) { refreshAll(); return }
+  const savedEnd = profilesLib.readMeta(root(), name).loginExpiresAt
+  if (typeof savedEnd === 'number' && end <= savedEnd) return
+  const release = await lockAccount(name)
+  if (!release) { log('/login: "' + name + '" is locked; next time'); loginStamps.delete(''); return }
+  let prevEnd = null
+  let moved = false
+  try {
+    snap = profilesLib.liveSnapshot()
+    if (profilesLib.findSameAccount(root(), snap, null) !== name) return
+    const newEnd = profilesLib.loginExpiresAt(snap.credentials)
+    const old = profilesLib.readPayload(root(), name)
+    const prev = old && old.credentials
+    prevEnd = profilesLib.loginExpiresAt(prev)
+    if (oauthRt(prev) === snap.refreshToken || (prevEnd && prevEnd === newEnd)) return
+    const pin = pinningOf(name)
+    const wasActive = lastActive === null ? true : lastActive === name
+    if (wasActive) log('/login: "' + name + '" was the active account; its previous login is not kept for pinning')
+    const keepOld = !wasActive && usesPinning(name) && oauthRt(prev) && typeof prevEnd === 'number' && prevEnd > Date.now() &&
+      (!pin || pin.expiresAt <= Date.now() || prevEnd > pin.expiresAt)
+    profilesLib.updateCredentials(root(), name, snap.credentials)
+    if (keepOld) {
+      const r = await loginsLib.setPinningLogin(root(), name, prev, (old.identity && old.identity.oauthAccount) || null, { lock: heldLock })
+      moved = !!(r && r.ok)
+      if (!moved) log('/login: the previous login of "' + name + '" was not kept for pinning: ' + (r && r.reason))
+    }
+  } finally { release() }
+  log('/login: kept the new login of "' + name + '" as its main login' + (moved ? '; the previous one is its pinning login now' : ''))
+  afterLoginChange()
+  const label = labelOf(name)
+  const ended = typeof prevEnd === 'number' && prevEnd <= Date.now()
+  notify('info', (ended ? 'Claude Code signed in to ' + label + ' again, so Switcher renewed its main login by itself: good for about '
+    : 'Claude Code signed in as ' + label + '. Switcher kept that fresh login as its main login: good for about ') + daysPhrase(end) + '.' +
+    (moved ? ' The previous login now keeps its pinned chats and folders going for about ' + daysPhrase(prevEnd) + '.' : ''))
+}
+
+function liveAccountByLogin(liveCreds) {
+  const end = profilesLib.loginExpiresAt(liveCreds)
+  if (end) {
+    const hit = profilesLib.list(root()).find((p) => p.loginExpiresAt === end)
+    if (hit) return hit.name
+  }
+  return lastActive
+}
+let lastActive = null
+
+function restoreLiveIdentity(active) {
+  if (!active || !profilesLib.exists(root(), active)) { log('/login in a pinned chat: no saved active account to put back'); return }
+  try {
+    const identity = (profilesLib.readPayload(root(), active) || {}).identity || {}
+    if (!identity.oauthAccount) return
+    const file = profilesLib.paths().claudeJson
+    for (let attempt = 0; ; attempt++) {
+      const { data: cfg, stamp } = fsx.readJsonForWrite(file)
+      const same = profilesLib.IDENTITY_KEYS.every((k) => JSON.stringify(cfg[k]) === JSON.stringify(identity[k]))
+      if (same) return
+      for (const k of profilesLib.IDENTITY_KEYS) {
+        if (identity[k] !== undefined) cfg[k] = identity[k]
+        else delete cfg[k]
+      }
+      try { fsx.writeFileAtomic(file, JSON.stringify(cfg, null, 2), { expect: stamp }); break } catch (e) {
+        if (e.code !== 'ECONCURRENTWRITE' || attempt >= 4) throw e
+      }
+    }
+    log('/login in a pinned chat: put "' + active + '" back as the account in use')
+  } catch (e) { log('/login in a pinned chat: putting the active account back: ' + (e && e.message)) }
+}
+
+async function identityWritten(dir) {
+  let since = null
+  try { const st = credstore.stat(dir); since = st && st.exists && st.modifiedMs ? st.modifiedMs : null } catch { since = null }
+  if (!since) since = Date.now()
+  const cfgMs = () => { try { return fs.statSync(profilesLib.paths().claudeJson).mtimeMs } catch { return 0 } }
+  const step = Math.min(250, Math.max(5, Math.floor(identityWaitMs / 10)))
+  for (;;) {
+    if (cfgMs() >= since) return true
+    if (Date.now() >= since + identityWaitMs) return false
+    await new Promise((r) => setTimeout(r, step))
+  }
+}
+
+async function pinnedLoginCheck(name) {
+  const dir = loginsLib.dirFor(root(), name)
+  const isNew = () => {
+    let creds = null
+    try { creds = credstore.read(dir) } catch { return null }
+    const meta = loginsLib.readMeta(root(), name)
+    const end = profilesLib.loginExpiresAt(creds)
+    if (!oauthRt(creds) || !meta) return null
+    if (meta.foreign && meta.foreign.expiresAt === end) return null
+    return end !== meta.expiresAt ? creds : null
+  }
+  if (!isNew()) return
+  if (locksLib.isHeld(root(), trackerLib.accountLock(name), trackerLib.LOCK_STALE_MS)) { loginStamps.delete(name); return }
+  const active = liveAccountByLogin(credstore.read(null))
+  const written = await identityWritten(dir)
+  const cfg = written ? (fsx.readJsonLoose(profilesLib.paths().claudeJson, null) || {}) : {}
+  const raw = cfg.oauthAccount && typeof cfg.oauthAccount === 'object' ? cfg.oauthAccount : null
+  const who = { accountUuid: (raw && raw.accountUuid) || null, email: (raw && raw.emailAddress) || null }
+  const meta = loginsLib.readMeta(root(), name) || {}
+  const mine = meta.accountUuid || meta.email ? { accountUuid: meta.accountUuid || null, email: meta.email || null } : profilesLib.savedWho(root(), name)
+  const unknown = !(who.accountUuid || who.email)
+  const same = unknown || profilesLib.sameAccount(mine, who)
+  if (!written) log('/login in a pinned chat of "' + name + '": ~/.claude.json didn\'t change within ' + Math.round(identityWaitMs / 1000) + ' s; taken as the same account')
+  else if (unknown) log('/login in a pinned chat of "' + name + '": who signed in can\'t be read; taken as the same account')
+
+  const release = await lockAccount(name)
+  if (!release) { log('/login in a pinned chat of "' + name + '": locked; next time'); loginStamps.delete(name); return }
+  let creds = null
+  try {
+    creds = isNew()
+    if (!creds) return
+    if (same) {
+      const r = await loginsLib.setPinningLogin(root(), name, creds, raw && !unknown ? raw : null, { lock: heldLock })
+      if (!r.ok) { log('/login in a pinned chat of "' + name + '": ' + r.reason); return }
+    } else {
+      await loginsLib.holdForeign(root(), name, { expiresAt: profilesLib.loginExpiresAt(creds), oauthAccount: raw }, { lock: heldLock })
+      takeouts.delete(name)
+    }
+  } finally { release() }
+  restoreLiveIdentity(active)
+  if (!same) await syncPins()
+  afterLoginChange()
+  const label = labelOf(name)
+  if (same) {
+    notify('info', 'A chat pinned to ' + label + ' signed in to ' + label + ' again, so ' + label + '\'s pinning login is renewed: good for about ' +
+      daysPhrase(profilesLib.loginExpiresAt(creds)) + '.')
+    return
+  }
+  log('/login in a pinned chat of "' + name + '": signed in as another account; held, no longer its pinning login')
+  await askAboutHeld(name, who)
+}
+
+async function askAboutHeld(name, who) {
+  const label = labelOf(name)
+  const other = profilesLib.findSameAccount(root(), who, null)
+  const useFor = other && other !== name ? 'Use it for ' + labelOf(other) : null
+  const addOwn = 'Add it as its own account'
+  const b = await notify('warn', 'A chat pinned to ' + label + ' signed in as ' + (who.email || 'another account') + ', which isn\'t ' + label +
+    '. Pinned chats only use ' + label + '\'s own logins, so new chats pinned to ' + label + ' start on the active account until ' + label +
+    ' has a new pinning login. ' +
+    (useFor ? 'It belongs to ' + labelOf(other) + ': use it as ' + labelOf(other) + '\'s pinning login?' : 'Add ' + (who.email || 'it') + ' as an account of its own?') +
+    ' The chats on that login reopen first, each when its reply finishes.',
+    useFor || addOwn, 'Discard it')
+  const action = useFor && b === useFor ? 'use' : !useFor && b === addOwn ? 'add' : b === 'Discard it' ? 'discard' : null
+  if (!action) { log('/login in a pinned chat of "' + name + '": no answer; the login stays with its chat'); return }
+  if (takeouts.has(name)) return
+  await takeOutWhenFree(name, { action, other: useFor ? other : null, who, label })
+}
+
+const heldAsked = new Set()
+function askAboutHeldLogins() {
+  for (const p of profilesLib.list(root())) {
+    let f = null
+    try { f = loginsLib.foreignOf(root(), p.name) } catch { f = null }
+    if (!f || takeouts.has(p.name)) continue
+    const key = p.name + '|' + (f.since || '') + '|' + (f.expiresAt || '')
+    if (heldAsked.has(key)) continue
+    heldAsked.add(key)
+    const o = f.oauthAccount || {}
+    const who = { accountUuid: o.accountUuid || null, email: o.emailAddress || null }
+    log('held login of "' + p.name + '": still held after a start; asking again')
+    askAboutHeld(p.name, who).catch((e) => log('held login of "' + p.name + '": ' + (e && e.message)))
+  }
+}
+
+const takeouts = new Map()
+
+function chatTitleOf(id) {
+  const pin = chatPins.read(root()).find((p) => p.id === id)
+  return liveTitle(id, pin && pin.title)
+}
+
+function liveTitle(id, saved) {
+  try {
+    const f = chatPins.chatFile(path.join(windowsLib.claudeDir(), 'projects'), id)
+    const t = f ? chatPins.titleOf(f) : null
+    if (t) return t
+  } catch {  }
+  return saved || null
+}
+
+async function takeOutWhenFree(name, plan) {
+  plan.reopened = new Set()
+  plan.told = false
+  takeouts.set(name, plan)
+  let inUse = []
+  try { inUse = loginsLib.listInUse(root(), name) } catch { inUse = [] }
+  for (const u of inUse) {
+    const title = u.sessionId ? chatTitleOf(u.sessionId) : null
+    if (!title || !chatTabs(title).length) continue
+    plan.reopened.add(u.pid)
+    if (chatBusy(u.sessionId)) {
+      waitingChats.set(u.sessionId, { name, title, takeout: name })
+      notify('info', '"' + title + '" runs on a login that isn\'t ' + plan.label + '\'s, so it reopens on the active account when this reply finishes.', 'Reopen now')
+        .then((b) => { if (b === 'Reopen now' && waitingChats.has(u.sessionId)) { waitingChats.delete(u.sessionId); return reopenChat(u.sessionId, title).then(() => settleTakeouts()) } }, () => {})
+    } else {
+      await reopenChat(u.sessionId, title)
+    }
+  }
+  await settleTakeouts()
+}
+
+async function settleTakeouts() {
+  for (const [name, plan] of [...takeouts]) {
+    if ([...waitingChats.values()].some((w) => w.takeout === name)) continue
+    let left = []
+    try { left = loginsLib.listInUse(root(), name) } catch { left = [] }
+    if (left.length) {
+      if (!plan.told && left.some((u) => !plan.reopened.has(u.pid))) {
+        plan.told = true
+        notify('info', 'A chat still runs on the login ' + (plan.who.email || 'of another account') + ' signed in to (in another window, or not open in a tab). ' +
+          'Close that chat, and Switcher finishes with the login then.')
+      }
+      continue
+    }
+    takeouts.delete(name)
+    try { await finishTakeout(name, plan) } finally { for (const done of plan.waiters || []) done() }
+  }
+}
+
+async function clearHeldFirst(name) {
+  const f = loginsLib.foreignOf(root(), name)
+  if (!f) return
+  let inUse = []
+  try { inUse = loginsLib.listInUse(root(), name) } catch { inUse = [] }
+  if (!inUse.length && !takeouts.has(name)) return
+  const label = labelOf(name)
+  const o = f.oauthAccount || {}
+  const who = { accountUuid: o.accountUuid || null, email: o.emailAddress || null }
+  let plan = takeouts.get(name)
+  const fresh = !plan
+  if (fresh) plan = { action: 'discard', other: null, who, label }
+  if (plan.action === 'discard') plan.replacing = true
+  const done = new Promise((resolve) => { plan.waiters = (plan.waiters || []).concat(resolve) })
+  log('pinning login for "' + name + '": waits for the chats on the held login of another account')
+  notify('info', label + '\'s new pinning login goes in once the chats on the login ' + (who.email || 'of another account') +
+    ' have reopened, each when its reply finishes.')
+  if (fresh) await takeOutWhenFree(name, plan)
+  else await settleTakeouts()
+  await done
+}
+
+async function finishTakeout(name, plan) {
+  const { who, label } = plan
+  if (plan.action === 'discard') {
+    const r = await loginsLib.takeOutForeign(root(), name, null)
+    if (!r.ok) { log('held login of "' + name + '": ' + r.reason); return }
+    afterLoginChange()
+    if (plan.replacing) { log('held login of "' + name + '": discarded; a new pinning login replaces it'); return }
+    notify('info', 'The login ' + (who.email || 'of another account') + ' was discarded. ' + label + ' needs a new pinning login.', 'Add account for pinning', 'Not now')
+      .then((b) => { if (b === 'Add account for pinning') return addPinning(name) }, () => {})
+    return
+  }
+  const tmp = newSigninDir()
+  try {
+    const r = await loginsLib.takeOutForeign(root(), name, tmp)
+    if (!r.ok || !r.moved) { log('held login of "' + name + '": ' + (r.reason || 'nothing to move')); return }
+    afterLoginChange()
+    const other = plan.other
+    if (plan.action === 'use' && other && profilesLib.exists(root(), other)) {
+      const cur = pinningOf(other)
+      const fresh = profilesLib.loginExpiresAt(credstore.read(tmp))
+      if (!cur || cur.expiresAt <= Date.now() || (fresh && cur.expiresAt < fresh)) {
+        const x = await loginsLib.importPinning(root(), other, tmp)
+        if (!x.ok) { notify('warn', 'That login couldn\'t be kept for ' + labelOf(other) + ' (' + x.reason + ').'); return }
+      }
+      afterLoginChange()
+      notify('info', labelOf(other) + ' has a pinning login now, good for about ' + daysPhrase((pinningOf(other) || {}).expiresAt) + '.')
+    } else if (plan.action === 'add') {
+      const nb = newAccountName(null, who.email)
+      profilesLib.importFromDir(root(), nb, tmp, { move: true, confirmedEmail: who.email })
+      editAccount(nb, labelFromEmail(who.email))
+      refreshAll()
+      const v = await ui.ask({ kind: 'confirm', art: 'success', title: 'A second account was added',
+        message: (who.email || 'It') + ' is an account of its own now. To give ' + label + ' its pinning login back, use Sign in again in its pin panel.',
+        field: { label: 'Name', value: labelOf(nb) }, buttons: ['Done', 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+      if (v && typeof v.text === 'string' && v.text.trim()) editAccount(nb, v.text.trim().slice(0, 40))
+      if (v && v.value === 'Add account for pinning') addPinning(nb).catch((e) => log('pinning: ' + (e && e.message)))
+    }
+  } finally { dropSigninDir(tmp) }
+}
+
+async function checkAll() {
+  const spec = { kind: 'checks', title: 'Check everything', message: 'A quick look at everything Switcher looks after on this PC.',
+    items: [{ label: 'Checking', status: 'run', detail: '' }], done: false }
+  const q = openAsk(spec)
+  const fixes = []
+  let items
+  try {
+    const claudeExt = vscode.extensions && vscode.extensions.getExtension('anthropic.claude-code')
+    const claudeVersion = (claudeExt && claudeExt.packageJSON && claudeExt.packageJSON.version) || null
+    const self = wrapperPath ? await healthLib.selfTest(wrapperPath, { timeoutMs: 5000 }) : { ok: false, version: null, reason: 'not installed' }
+    const logins = loginPairs().map((l) => ({ name: l.name, main: l.main,
+      pinning: l.pinning ? { expiresAt: l.pinning.expiresAt, dir: loginsLib.dirFor(root(), l.name) } : null }))
+    const rows = await healthLib.report({ root: root(), wrapperPath, logins, claudeVersion, selfTest: self,
+      wrapperSetting: vscode.workspace.getConfiguration('claudeCode').get('claudeProcessWrapper') || null })
+    items = rows.map((r) => {
+      const acct = profilesLib.exists(root(), r.name) ? r.name : null
+      const label = r.area === 'login' ? labelOf(r.name) + ': main login'
+        : r.area === 'pinning' ? labelOf(r.name) + ': pinning login'
+          : r.area === 'pins' && acct ? labelOf(r.name) + ': pins'
+            : r.area === 'wrapper' ? 'Pin wrapper: ' + r.name : r.name
+      let fix = null
+      if (r.state !== 'ok' && acct && r.area === 'login') fix = { label: 'Sign in again', run: () => relogin(acct) }
+      else if (r.state !== 'ok' && acct && (r.area === 'pinning' || r.area === 'pins')) {
+        fix = { label: pinningOf(acct) ? 'Sign in again' : 'Add account for pinning', run: () => addPinning(acct) }
+      } else if (r.state !== 'ok' && r.area === 'wrapper') fix = { label: 'Set it up again', run: () => syncPins() }
+      fixes.push(fix)
+      return { label, status: r.state, detail: r.text, fix: fix ? fix.label : null }
+    })
+    if (liveLoginUnsaved()) {
+      const id = profilesLib.currentIdentity()
+      fixes.push({ label: 'Save it', run: () => saveCurrentLogin() })
+      items.push({ label: 'The login in use', status: 'warn', detail: ((id && id.email) || 'It') + ' isn\'t saved yet.', fix: 'Save it' })
+    }
+  } catch (e) {
+    log('check everything: ' + (e && e.stack))
+    items = [{ label: 'Check everything', status: 'bad', detail: 'The checks couldn\'t run: ' + (e && e.message), fix: null }]
+  }
+  const need = items.filter((x) => x.status === 'bad' || x.status === 'warn').length
+  updateAsk(q.id, Object.assign({}, spec, { items, done: true,
+    summary: need ? need + (need === 1 ? ' thing needs' : ' things need') + ' a look. The rest is fine.' : 'Everything works.' }))
+  const ans = await q.answer
+  if (!ans) return
+  if (ans.value === 'again') return checkAll()
+  const f = ans.value === 'fix' ? fixes[ans.index] : null
+  if (f) return f.run()
+}
+
+function folderChats(folder) {
+  return chatPins.listChats(path.join(windowsLib.claudeDir(), 'projects'), folder, 40)
+}
+
+function agoText(ms) {
+  const m = Math.round((Date.now() - ms) / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return m + ' min ago'
+  const h = Math.round(m / 60)
+  if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago')
+  const d = Math.round(h / 24)
+  return d + (d === 1 ? ' day ago' : ' days ago')
+}
+
+async function pinChat(preset) {
+  await ensureGlobalMode()
+  const folder = firstFolder()
+  if (!folder) { notify('info', 'Open a folder first: chats are pinned from the folder they belong to.'); return }
+  const chats = folderChats(folder)
+  if (!chats.length) { notify('info', 'No chats in "' + path.basename(folder) + '" yet. Start one, then pin it.'); return }
+  const pinned = new Map(chatPins.read(root()).map((p) => [p.id, p]))
+  const presetName = typeof preset === 'string' && profilesLib.exists(root(), preset) ? preset : null
+  const chat = await ui.pick(chats.map((c) => ({
+    label: (pinned.has(c.id) ? '$(pin) ' : '$(comment-discussion) ') + (c.title || 'Untitled chat'),
+    description: agoText(c.at) + (pinned.has(c.id) ? '  ·  pinned to ' + labelOf(pinned.get(c.id).name) : ''),
+    chat: c,
+  })), { title: presetName ? 'Pin a chat to ' + labelOf(presetName) : null, placeHolder: 'Pin which chat?', matchOnDescription: true })
+  if (!chat) return
+  const c = chat.chat
+  const current = pinned.has(c.id) ? pinned.get(c.id).name : null
+  let pick = presetName ? { name: presetName } : null
+  if (!pick) {
+    const items = accountItems(current)
+    if (current) items.push({ label: '$(close) Unpin this chat', description: 'back to the active account', unpin: true })
+    pick = await ui.pick(items, { placeHolder: 'Run "' + (c.title || 'this chat') + '" as which account?' })
+    if (!pick) return
+    if (pick.unpin) { await unpinChat(c.id); return }
+  }
+  if (pick.name === current) { notify('info', 'That chat is already pinned to ' + labelOf(current) + '.'); return }
+  if (!(await ensurePinning(pick.name))) return
+  const name = c.title || 'this chat'
+  const label = labelOf(pick.name)
+  const open = chatTabs(c.title).length > 0
+  const ok = await ui.confirm({
+    title: 'Pin "' + name + '" to ' + label + '?',
+    message: 'It uses ' + label + '\'s pinning login, a separate login that never signs out your other chats. ' +
+      (open ? 'If the chat is replying, it finishes first, then reopens on ' + label + '.' : 'It opens on ' + label + ' the next time you open it.'),
+    confirmLabel: open ? 'Pin and reopen' : 'Pin',
+  })
+  if (!ok) return
+  chatPins.set(root(), c.id, pick.name, c.title)
+  if (!(await syncPins())) { chatPins.remove(root(), c.id); await syncPins(); refreshAll(); return }
+  refreshAll()
+  if (open) await reopenWhenIdle(c.id, c.title, pick.name)
+  else notify('info', '"' + name + '" is pinned to ' + label + '. It opens on ' + label + ' the next time you open it.')
+}
+
+const waitingChats = new Map()
+
+function chatBusy(id) {
+  try { return busySessions().has(id) } catch { return false }
+}
+
+async function reopenWhenIdle(id, title, name) {
+  const label = labelOf(name)
+  if (chatBusy(id)) {
+    waitingChats.set(id, { name, title })
+    scheduleLoginWatch()
+    notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + '. Claude is still replying, so it moves to ' + label +
+      ' when this reply finishes. To move it now, use Reopen now in the Pinned list.')
+    return
+  }
+  waitingChats.delete(id)
+  if (await reopenChat(id, title)) notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + ' and reopened on it. It runs on ' + label + '\'s pinning login from now on.')
+}
+
+let settlingChats = false
+async function settleWaitingChats() {
+  if (settlingChats) return
+  settlingChats = true
+  try { await settleWaitingChatsNow(); if (takeouts.size) await settleTakeouts() } finally { settlingChats = false }
+}
+
+async function settleWaitingChatsNow() {
+  for (const [id, w] of [...waitingChats]) {
+    if (w.takeout) {
+      if (chatBusy(id)) continue
+      waitingChats.delete(id)
+      if (await reopenChat(id, w.title)) notify('info', '"' + (w.title || 'The chat') + '" finished its reply and reopened on the active account.')
+      continue
+    }
+    const pin = chatPins.read(root()).find((p) => p.id === id)
+    if (!pin) { waitingChats.delete(id); continue }
+    if (chatBusy(id)) continue
+    waitingChats.delete(id)
+    if (await reopenChat(id, w.title)) {
+      notify('info', '"' + (w.title || 'The chat') + '" finished its reply and reopened on ' + labelOf(pin.name) + '. It runs on ' +
+        labelOf(pin.name) + '\'s pinning login from now on.')
+    }
+    refreshAll()
+  }
+}
+
+async function reopenNow(id) {
+  const pin = chatPins.read(root()).find((p) => p.id === id)
+  if (!pin) return
+  waitingChats.delete(id)
+  if (await reopenChat(id, pin.title)) notify('info', '"' + (pin.title || 'The chat') + '" reopened on ' + labelOf(pin.name) + '. The reply it was writing stopped part-way, so ask it to carry on if you need the rest.')
+}
+
+async function movePin(m) {
+  const to = typeof m.to === 'string' && store.validName(m.to) && profilesLib.exists(root(), m.to) ? m.to : null
+  if (!to || !pinningReady(to)) return
+  if (typeof m.id === 'string' && chatPins.validId(m.id)) {
+    const pin = chatPins.read(root()).find((p) => p.id === m.id)
+    if (!pin || pin.name === to) return
+    chatPins.set(root(), m.id, to, pin.title)
+    await syncPins()
+    refreshAll()
+    if (chatTabs(pin.title).length) return reopenWhenIdle(m.id, pin.title, to)
+    notify('info', '"' + (pin.title || 'The chat') + '" is pinned to ' + labelOf(to) + ' now.')
+  } else if (typeof m.folder === 'string' && store.getPin(root(), m.folder)) {
+    store.setPin(root(), m.folder, to)
+    repin()
+    notify('info', '"' + path.basename(m.folder) + '" is pinned to ' + labelOf(to) + ' now. New chats there run on it; chats already open move when you reopen them.')
+  }
+}
+
+async function unpinChat(id) {
+  const pin = chatPins.read(root()).find((p) => p.id === id)
+  if (!pin || !chatPins.remove(root(), id)) return
+  waitingChats.delete(id)
+  await syncPins()
+  refreshAll()
+  notify('info', '"' + (pin.title || 'The chat') + '" is unpinned. It uses the active account the next time it opens.')
+}
+
+async function reopenChat(id, savedTitle) {
+  const title = liveTitle(id, savedTitle)
+  const tabs = chatTabs(title)
+  if (tabs.length > 1) {
+    log('chat pins: not reopening "' + title + '": ' + tabs.length + ' open chats show that title')
+    notify('info', tabs.length + ' open chats are called "' + title + '", so the one that moved wasn\'t reopened, to be sure the right one ' +
+      'restarts. Close it, then open it again from Claude Code\'s past conversations: it starts on its new account then.')
+    return false
+  }
+  try {
+    if (tabs.length) await vscode.window.tabGroups.close(tabs)
+    log('chat pins: reopening "' + (title || id) + '" (' + tabs.length + ' tab' + (tabs.length === 1 ? '' : 's') + ' closed)')
+  } catch (e) { log('reopen chat: closing its tab: ' + (e && e.message)) }
+  await vscode.commands.executeCommand('claude-vscode.editor.open', id)
+  return true
+}
+
+function chatTabs(title) {
+  const out = []
+  if (!title || !vscode.window.tabGroups) return out
+  for (const g of vscode.window.tabGroups.all) {
+    for (const t of g.tabs) {
+      const view = t.input && t.input.viewType
+      if (typeof view === 'string' && /claudeVSCodePanel$/.test(view) && chatPins.tabMatches(t.label, title)) out.push(t)
+    }
+  }
+  return out
 }
 
 async function unpinFolder(folder) {
   if (!folder || !store.getPin(root(), folder)) return
   store.setPin(root(), folder, null)
-  refreshAll()
-  const here = firstFolder()
-  if (here && store.pinKey(here) === store.pinKey(folder) && pinnedHere()) {
-    await offerReload('"' + path.basename(here) + '" is unpinned. Reload the window to go back to the global account.')
-  } else {
-    vscode.window.showInformationMessage('Unpinned "' + path.basename(folder) + '". Its windows use the global account after their next reload.')
-  }
-}
-
-async function windowLogin(nameArg) {
-  let name = typeof nameArg === 'string' && profilesLib.exists(root(), nameArg) ? nameArg : null
-  if (!name) {
-    const pick = await vscode.window.showQuickPick(accountItems(null),
-      { placeHolder: 'Sign in a window login for which account?' })
-    if (!pick) return false
-    name = pick.name
-  }
-  if (pinnedHere() && pinState.name === name) {
-    vscode.window.showWarningMessage('This window is using that window login right now. ' +
-      'Sign it in again from another window.')
-    return false
-  }
-
-  const expected = (profilesLib.readMeta(root(), name) || {}).email || null
-  const dir = windowsLib.prepare(root(), name)
-  const startedAt = Date.now()
-  const args = loginArgs(expected)
-  if (!launchTerminal('Claude window login: ' + name, dir, args)) return false
-
-  const res = await vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    cancellable: true,
-    title: 'Signing in a window login for "' + name + '"' + (expected ? ' (' + expected + ')' : '') +
-      '. Finish in the browser; use a private window if it is signed in to another account.',
-  }, (_progress, token) => watchLogin(dir, startedAt, token))
-  finishLoginDir(dir)
-  if (!res || !res.ok) {
-    if (res && res.reason === 'timed out') {
-      vscode.window.showWarningMessage('Stopped waiting for the window login for "' + name + '".')
-    }
-    return false
-  }
-
-  const id = windowsLib.identity(root(), name)
-  const got = (res.status && res.status.email) || (id && id.email) || null
-  if (expected && got && got.toLowerCase() !== expected.toLowerCase()) {
-    try { credstore.remove(dir) } catch (e) { log('discarding wrong window login failed: ' + (e && e.message)) }
-    await vscode.window.showWarningMessage('That signed in as ' + got + ', not ' + expected + ' ("' + name +
-      '"), so the login was discarded. Your browser most likely reused another account: use a ' +
-      'private window signed in to ' + expected + ' and try again.', { modal: true })
-    return false
-  }
-  store.lockdown(dir)
-  log('window login ready for "' + name + '"')
-  refreshAll()
-  vscode.window.showInformationMessage('Window login ready for "' + name + '"' + (got ? ' (' + got + ')' : '') + '.')
-  return true
+  repin()
+  notify('info', '"' + path.basename(folder) + '" is unpinned. New chats there use the active account now; ' +
+    'chats already open move to it when you reopen them.')
 }
 
 function sparesRoot() { return path.join(root(), 'spares') }
@@ -1499,20 +2671,20 @@ function cleanupSpares() {
 }
 
 async function askPassphrase(title) {
-  const first = await vscode.window.showInputBox({
+  const first = await ui.input({
     title: title || 'Passphrase for the login file',
     prompt: 'You will type this again on the other PC to import it. At least ' + moveLib.MIN_PASSPHRASE + ' characters.',
     password: true, ignoreFocusOut: true,
     validateInput: (v) => (v && v.length >= moveLib.MIN_PASSPHRASE ? null : 'Use at least ' + moveLib.MIN_PASSPHRASE + ' characters.'),
   })
   if (!first) return null
-  const again = await vscode.window.showInputBox({
+  const again = await ui.input({
     title: title || 'Passphrase for the login file',
     prompt: 'Type it once more.', password: true, ignoreFocusOut: true,
   })
   if (again === undefined) return null
   if (again !== first) {
-    vscode.window.showWarningMessage("The two passphrases didn't match, so nothing was made. Try again whenever you like.")
+    notify('warn', "The two passphrases didn't match, so nothing was made. Try again whenever you like.")
     return null
   }
   return first
@@ -1525,7 +2697,7 @@ async function makeSpareLogin(nameArg) {
   const expected = meta.email || null
   const label = labelOf(name)
 
-  const go = await vscode.window.showInformationMessage(
+  const go = await notify('info', 
     'Make a separate login for "' + label + '" to take to another PC?',
     { modal: true, detail: 'You will sign in to ' + (expected || 'the account') + ' once more in the browser, ' +
       'so you need its login or a code from its owner. The new login goes into a passphrase-protected file. ' +
@@ -1564,7 +2736,7 @@ async function makeSpareLogin(nameArg) {
     }, (_progress, token) => watchLogin(dir, startedAt, token))
     finishLoginDir(dir)
     if (!res || !res.ok) {
-      if (res && res.reason === 'timed out') vscode.window.showWarningMessage('Stopped waiting for the login for "' + label + '". Nothing was saved.')
+      if (res && res.reason === 'timed out') notify('warn', 'Stopped waiting for the login for "' + label + '". Nothing was saved.')
       return false
     }
 
@@ -1573,7 +2745,7 @@ async function makeSpareLogin(nameArg) {
     const o = cfg.oauthAccount || {}
     const got = (res.status && res.status.email) || o.emailAddress || null
     if (expected && (!got || got.toLowerCase() !== expected.toLowerCase())) {
-      await vscode.window.showWarningMessage('That signed in as ' + (got || 'an unknown account') + ', not ' + expected +
+      await notify('warn', 'That signed in as ' + (got || 'an unknown account') + ', not ' + expected +
         ', so nothing was saved. Your browser probably reused another account. Try again in a private window signed in to ' +
         expected + '.', { modal: true })
       return false
@@ -1590,7 +2762,8 @@ async function makeSpareLogin(nameArg) {
       name,
       payload: { credentials, identity, capturedAt },
       meta: { email: got || expected, org: o.organizationName || meta.org || null, subscription: o.seatTier || null,
-        plan: profilesLib.planOf(o, credentials), capturedAt, accountUuid: o.accountUuid || meta.accountUuid || null },
+        plan: profilesLib.planOf(o, credentials), loginExpiresAt: profilesLib.loginExpiresAt(credentials), capturedAt,
+        accountUuid: o.accountUuid || meta.accountUuid || null },
       display: store.displayOf(root(), name),
       remote: store.getRemote(root(), name),
       artifacts: store.getArtifacts(root(), name),
@@ -1604,7 +2777,7 @@ async function makeSpareLogin(nameArg) {
       throw new Error("the file didn't read back correctly")
     }
     log('made a login for another PC for "' + name + '"')
-    vscode.window.showInformationMessage('Saved a separate login for "' + label + '" to ' + file + '. ' +
+    notify('info', 'Saved a separate login for "' + label + '" to ' + file + '. ' +
       importHint() + ' It lasts about four weeks from today.')
     return true
   } finally {
@@ -1633,11 +2806,11 @@ async function moveToAnotherPC(nameArg) {
   if (!name) return false
   const label = labelOf(name)
   if (profilesLib.activeProfile(root()) === name) {
-    await vscode.window.showWarningMessage('"' + label + '" is the account Claude Code is using now, so it can\'t leave this PC yet.',
+    await notify('warn', '"' + label + '" is the account Claude Code is using now, so it can\'t leave this PC yet.',
       { modal: true, detail: 'Switch to another account first, then move it.' })
     return false
   }
-  const go = await vscode.window.showWarningMessage('Move "' + label + '" to another PC?', {
+  const go = await notify('warn', 'Move "' + label + '" to another PC?', {
     modal: true,
     detail: 'It will be removed from this PC as soon as the file is saved. To use it here again later, sign in again, ' +
       'or move it back from the other PC.\n\nTo keep it here as well, use "Make a login for another PC…" instead.',
@@ -1658,7 +2831,7 @@ async function moveToAnotherPC(nameArg) {
   try { store.setArtifacts(root(), name, 'on') } catch (e) { log('artifacts pref: ' + e.message) }
   log('moved "' + name + '" out of this PC')
   refreshAll()
-  vscode.window.showInformationMessage('Moved "' + label + '" out of this PC, into ' + res.file + '. ' + importHint(), 'Show file')
+  notify('info', 'Moved "' + label + '" out of this PC, into ' + res.file + '. ' + importHint(), 'Show file')
     .then((pick) => { if (pick === 'Show file') revealFile(res.file) }, () => {})
   return true
 }
@@ -1674,14 +2847,14 @@ async function importFromFile() {
   if (!sel || !sel[0]) return false
   const file = sel[0].fsPath
   if (transferLib.wasImported(file)) {
-    vscode.window.showWarningMessage(path.basename(file) + ' was imported once already. A login can only be used on one PC; ' +
+    notify('warn', path.basename(file) + ' was imported once already. A login can only be used on one PC; ' +
       'ask for a new file instead.')
     return false
   }
 
   let read = null
   for (;;) {
-    const passphrase = await vscode.window.showInputBox({
+    const passphrase = await ui.input({
       title: 'Passphrase for ' + path.basename(file),
       prompt: 'The passphrase chosen when the file was made.',
       password: true, ignoreFocusOut: true,
@@ -1692,14 +2865,14 @@ async function importFromFile() {
       break
     } catch (e) {
       if (e.code !== 'EPASSPHRASE') throw e
-      if ((await vscode.window.showWarningMessage(e.message, 'Try again')) !== 'Try again') return false
+      if ((await notify('warn', e.message, 'Try again')) !== 'Try again') return false
     }
   }
 
   const replace = new Set()
   for (const a of read.accounts) {
     if (transferLib.planFor(root(), a, read.exportedAt).action !== 'replace') continue
-    const ok = await vscode.window.showWarningMessage('"' + a.name + '" is already saved here. Replace its login with the one in the file?',
+    const ok = await notify('warn', '"' + a.name + '" is already saved here. Replace its login with the one in the file?',
       { modal: true, detail: 'Do this when the one here has expired. The login saved here is kept in backups.' }, 'Replace')
     if (ok === 'Replace') replace.add(a.name)
   }
@@ -1708,13 +2881,13 @@ async function importFromFile() {
   const got = res.added.concat(res.replaced)
   const skipped = res.skipped.map((s) => s.name + ' (' + s.reason + ')').join(', ')
   if (!got.length) {
-    vscode.window.showWarningMessage('Nothing was imported from ' + path.basename(file) + (skipped ? ': ' + skipped + '.' : '.'))
+    notify('warn', 'Nothing was imported from ' + path.basename(file) + (skipped ? ': ' + skipped + '.' : '.'))
     return false
   }
   const used = transferLib.markImported(file) || file
   log('imported ' + got.join(', ') + ' from a move file')
   refreshAll()
-  vscode.window.showInformationMessage(
+  notify('info', 
     (res.added.length ? 'Added ' + res.added.map(labelOf).join(', ') + '. ' : '') +
     (res.replaced.length ? 'Replaced the login for ' + res.replaced.map(labelOf).join(', ') + '. ' : '') +
     (skipped ? 'Skipped ' + skipped + '. ' : '') +
@@ -1739,32 +2912,29 @@ async function forgetWindowLogin(nameArg) {
   let name = typeof nameArg === 'string' && names.includes(nameArg) ? nameArg : null
   if (!name) {
     if (!names.length) {
-      vscode.window.showInformationMessage('No window logins yet.')
+      notify('info', 'No window logins yet.')
       return
     }
-    const pick = await vscode.window.showQuickPick(names.map((n) => {
+    const pick = await ui.pick(names.map((n) => {
       const id = windowsLib.identity(root(), n)
       return { label: labelOf(n), description: id && id.email ? id.email : undefined, name: n }
     }), { placeHolder: 'Forget which window login?' })
     if (!pick) return
     name = pick.name
   }
-  if (pinnedHere() && pinState.name === name) {
-    vscode.window.showWarningMessage('This window is using that window login. Unpin this folder and ' +
-      'reload first, or forget it from another window.')
+  if (pinState && pinState.source === 'launch' && pinState.name === name) {
+    notify('warn', 'This window was started with that window login. Forget it from another window.')
     return
   }
-  const confirm = await vscode.window.showWarningMessage('Forget the window login for "' + labelOf(name) +
-    '"? Folders pinned to it go back to the global account. Your chats, and the account saved in ' +
-    'the switcher, are not affected.', { modal: true }, 'Forget')
-  if (confirm !== 'Forget') return
+  const confirm = await ui.confirm({ title: 'Forget the old window login for ' + labelOf(name) + '?',
+    message: 'Pins no longer use it: they use this account’s pinning login. Your chats, your pins and the account saved in the switcher are not affected.',
+    confirmLabel: 'Forget' })
+  if (!confirm) return
   const kept = windowsLib.remove(root(), name)
-  const unpinned = store.unpinAccount(root(), name)
   refreshAll()
   const keptNote = typeof kept === 'string' && kept.includes(path.join(root(), 'backups'))
     ? ' Its own files (like a CLAUDE.md or settings made in that window) are kept in ' + kept + '.' : ''
-  vscode.window.showInformationMessage('Forgot the window login for "' + labelOf(name) + '"' +
-    (unpinned ? '; ' + unpinned + ' folder pin' + (unpinned === 1 ? '' : 's') + ' removed.' : '.') + keptNote)
+  notify('info', 'Forgot the old window login for "' + labelOf(name) + '".' + keptNote)
 }
 
 function privateFiles() {
@@ -1788,13 +2958,13 @@ async function offerPrivateFiles(context, always) {
   const key = 'claudeswitcher.dontAskPrivateFiles'
   if (!always && context && context.globalState && context.globalState.get(key)) return
   const names = loose.map((f) => f.replace(os.homedir(), '~')).join(' and ')
-  const choice = await vscode.window.showWarningMessage(
+  const choice = await notify('warn', 
     names + ' can be read by other users on this computer. They can hold ' +
     'MCP server tokens and API keys. Make ' + (loose.length > 1 ? 'them' : 'it') + ' private (only you can read it)?',
     'Make Private', ...(always ? [] : ["Don't Ask Again"]))
   if (choice === 'Make Private') {
     const done = makePrivate(loose)
-    vscode.window.showInformationMessage(done.length === loose.length ? 'Done: only you can read them now.'
+    notify('info', done.length === loose.length ? 'Done: only you can read them now.'
       : "Some couldn't be changed; Show Status has the details.")
   } else if (choice === "Don't Ask Again" && context && context.globalState) {
     await context.globalState.update(key, true)
@@ -1854,8 +3024,11 @@ async function showStatus() {
   }
   output.appendLine('(* = active)')
   output.appendLine('this window: ' + (pinnedHere()
-    ? 'pinned to ' + pinState.name + ' (' + pinState.source + (pinState.claudeWasActive ? ', Claude Code started first' : '') + ')'
-    : 'global account'))
+    ? 'pinned to ' + pinState.name + ' (' + (pinState.source === 'pin' ? 'pinning login' : pinState.source) + ')'
+    : pinState && pinState.problem === 'no-pinning' ? 'folder pinned to ' + pinState.name + ', which has no pinning login: active account' : 'active account'))
+  const pinning = loginsLib.names(root()).filter((n) => pinningOf(n))
+  output.appendLine('pinning logins: ' + (pinning.length ? pinning.map((n) => n + ' (until ' + new Date(pinningOf(n).expiresAt).toISOString().slice(0, 10) + ')').join(', ') : '(none)'))
+  output.appendLine('chat pins: ' + chatPins.read(root()).length + '; wrapper: ' + (vscode.workspace.getConfiguration('claudeCode').get('claudeProcessWrapper') || 'off'))
   const pins = store.getPins(root())
   output.appendLine('folder pins: ' + (Object.keys(pins).length ? '' : '(none)'))
   for (const [folder, n] of Object.entries(pins)) output.appendLine('   ' + folder + '  ->  ' + n)
@@ -1890,7 +3063,7 @@ async function refreshUsage() {
   const pauseKey = cur.dir || DEFAULT_NAME
   const pausedFor = (usagePausedUntil.get(pauseKey) || 0) - Date.now()
   if (pausedFor > 0) {
-    vscode.window.showInformationMessage('Anthropic is rate-limiting usage checks for this ' +
+    notify('info', 'Anthropic is rate-limiting usage checks for this ' +
       'account, so the meter is showing cached figures. Try again in about ' +
       minutesFrom(pausedFor) + ' min.')
     return
@@ -1904,7 +3077,7 @@ async function refreshUsage() {
   try {
     const res = await liveLib.fetchUsage(cur.dir)
     if (res.ok) {
-      usageLib.writeLiveCache(root(), cur.dir, res.utilization)
+      usageLib.writeLiveCache(root(), cur.dir, res.utilization, res.loginExpiresAt)
       updateUsageBar()
       postState()
       log('live usage fetched for ' + (cur.name || 'default'))
@@ -1914,19 +3087,19 @@ async function refreshUsage() {
       usageBar.text = previousText
       updateUsageBar()
       log('usage rate-limited for ' + (cur.name || 'default') + '; pausing ' + Math.round(wait / 1000) + 's')
-      vscode.window.showWarningMessage('Anthropic is rate-limiting usage checks for this account ' +
+      notify('warn', 'Anthropic is rate-limiting usage checks for this account ' +
         'right now, which is common just after switching. The meter is showing cached figures; ' +
         'try again in about ' + minutesFrom(wait) + ' min.')
     } else {
       usageBar.text = previousText
       updateUsageBar()
-      vscode.window.showWarningMessage(
+      notify('warn', 
         'Couldn\'t fetch live usage: ' + res.reason + '. Showing the last figures we have for now.')
     }
   } catch (e) {
     usageBar.text = previousText
     updateUsageBar()
-    vscode.window.showErrorMessage('Usage refresh failed: ' + (e && e.message))
+    notify('error', 'Usage refresh failed: ' + (e && e.message))
   } finally {
     usageFetchInFlight = false
   }
@@ -1959,6 +3132,7 @@ function pageHtml(webview, layout) {
     cssUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'accounts.css')))),
     jsUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'accounts.js')))),
     fontUri: cd ? String(webview.asWebviewUri(vscode.Uri.file(path.join(cd, 'codicon.ttf')))) : null,
+    logoUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'icon.png')))),
     layout,
   })
 }
@@ -1996,6 +3170,7 @@ function pageState() {
       folder: here,
       pinnedTo: pinnedHere() ? pinState.name : null,
       pinnedLabel: pinnedHere() ? labelOf(pinState.name) : null,
+      needsPinning: !!(pinState && pinState.source === 'pin' && !pinState.ready) ? labelOf(pinState.name) : null,
     },
     accounts: profilesLib.list(root()).sort(byLabel).map((p) => {
       const r = rows.find((x) => x.name === p.name) || {}
@@ -2017,20 +3192,32 @@ function pageState() {
         starting: startingSessions.has(p.name),
         keepAlive: store.getKeepAlive(root(), p.name),
         context: contextOf[p.name] || null,
-        plan: p.plan || null,
+        plan: profilesLib.planName(p.plan),
+        orgId: orgOf(p.name),
+        loginExpiresAt: loginExpiryOf(p.name, null, p.name === active),
         session: r.session || null,
         weekly: r.weekly || null,
         scoped: r.scoped || null,
         noSession: !!r.noSession,
         fetchedAtMs: r.fetchedAtMs || null,
-        windowLogin: hasWindowDir ? { signedIn: windowsLib.hasLogin(root(), p.name), email: (wid && wid.email) || null } : null,
+        windowLogin: hasWindowDir ? (() => {
+          const st = windowsLib.loginState(root(), p.name)
+          return { signedIn: st === 'yes', expired: st === 'expired', email: (wid && wid.email) || null }
+        })() : null,
         pinCount: pinCount(p.name),
+        pinning: pinningOf(p.name),
       }
     }),
     pins: Object.entries(pins).map(([folder, name]) => ({
-      folder, name, label: labelOf(name), here: !!(here && store.pinKey(here) === folder),
+      folder, name, label: labelOf(name), here: !!(here && store.pinKey(here) === folder), ready: pinningReady(name),
     })),
+    chatPins: chatPins.read(root()).filter((p) => profilesLib.exists(root(), p.name))
+      .map((p) => ({ id: p.id, name: p.name, label: labelOf(p.name), title: p.title, ready: pinningReady(p.name),
+        waiting: waitingChats.has(p.id) && chatBusy(p.id) })),
     autoContinue: autoContinueOn() ? autoContinueState() : null,
+    prefs: allPrefs(),
+    welcome: welcomeState(),
+    checklist: checklistState(),
   }
 }
 
@@ -2051,22 +3238,237 @@ function postState() {
   for (const w of targets) w.postMessage({ type: 'state', state }).then(() => {}, () => {})
 }
 
+const SEEN_KEY = 'claudeswitcher.seenVersion'
+const CHECKLIST_KEY = 'claudeswitcher.checklist'
+
+function checklistState() {
+  return !!(extContext && extContext.globalState && extContext.globalState.get(CHECKLIST_KEY) === 'show')
+}
+
+function welcomeState() {
+  if (!extContext || !extContext.globalState || !version) return null
+  return welcomeLib.welcomeFor(extContext.globalState.get(SEEN_KEY), version, profilesLib.list(root()).length > 0)
+}
+
+async function offerWelcome() {
+  const w = welcomeState()
+  if (!w || !extContext.globalState || extContext.globalState.get('claudeswitcher.welcomeOffered') === version) return
+  await extContext.globalState.update('claudeswitcher.welcomeOffered', version)
+  if (w.kind === 'install') { openAccountsTab(); return }
+  const pick = await notify('info', 'Switcher for Claude Code was updated to ' + version + '.', 'See What’s New')
+  if (pick === 'See What’s New') openAccountsTab()
+}
+
+const asks = new Map()
+let askSeq = 0
+
+const PAGE_ICON = {
+  save: 'check', 'sign-in': 'signin', 'cloud-download': 'upload', folder: 'folder', 'folder-opened': 'folder',
+  close: 'x', pin: 'pin', 'comment-discussion': 'chat', 'settings-gear': 'gear', window: 'window', trash: 'trash',
+}
+
+function pageItems(list) {
+  return list.map((it, i) => {
+    const label = String(it.label || '')
+    const m = /^\$\(([\w-]+)\)\s*/.exec(label)
+    return {
+      i,
+      label: label.replace(/^\$\([\w-]+\)\s*/, ''),
+      description: it.description ? String(it.description) : '',
+      icon: m ? PAGE_ICON[m[1]] || null : null,
+      account: typeof it.name === 'string' && profilesLib.exists(root(), it.name) ? it.name : null,
+      current: !!(m && m[1] === 'pin'),
+    }
+  })
+}
+
+function pageWebviews() { return [panel && panel.webview, view && view.webview].filter(Boolean) }
+
+function postAsks() {
+  for (const w of pageWebviews()) {
+    for (const [id, a] of asks) w.postMessage({ type: 'ask', id, spec: a.spec }).then(() => {}, () => {})
+  }
+}
+
+function endAsk(id, value) {
+  const a = asks.get(id)
+  if (!a) return
+  asks.delete(id)
+  for (const w of pageWebviews()) w.postMessage({ type: 'askDone', id }).then(() => {}, () => {})
+  a.resolve(value)
+}
+
+function cancelAsksIfNoPage() {
+  if (panel || view) return
+  for (const id of [...asks.keys()]) endAsk(id, undefined)
+  for (const id of [...notes.keys()]) endNote(id, undefined)
+}
+
+async function askViaPage(spec, list) {
+  const id = ++askSeq
+  const answer = new Promise((resolve) => asks.set(id, { spec, resolve }))
+  await openAccounts()
+  postAsks()
+  const v = await answer
+  if (spec.kind === 'pick') return v === undefined ? undefined : list[v]
+  return v
+}
+
+let asker = askViaPage
+
+function openAsk(spec) {
+  const id = ++askSeq
+  const answer = new Promise((resolve) => asks.set(id, { spec, resolve }))
+  if (asker === askViaPage) openAccounts().then(postAsks, (e) => log('page: ' + (e && e.message)))
+  return { id, answer }
+}
+
+function updateAsk(id, spec) {
+  const a = asks.get(id)
+  if (!a) return
+  a.spec = spec
+  for (const w of pageWebviews()) w.postMessage({ type: 'ask', id, spec }).then(() => {}, () => {})
+}
+
+const ui = {
+  async pick(items, opts) {
+    const list = (await items || []).filter(Boolean)
+    if (!list.length) return undefined
+    const o = opts || {}
+    return asker({ kind: 'pick', title: o.title || null, placeholder: o.placeHolder || '', items: pageItems(list) }, list)
+  },
+  async confirm(opts) {
+    const o = opts || {}
+    const v = await asker({ kind: 'confirm', title: o.title || '', message: o.message || '', confirmLabel: o.confirmLabel || 'OK' }, null)
+    return v === true ? true : undefined
+  },
+  async input(opts) {
+    const o = opts || {}
+    let value = o.value || ''
+    let error = null
+    for (;;) {
+      const v = await asker({ kind: 'input', title: o.title || null, prompt: o.prompt || '', placeholder: o.placeHolder || '',
+        value, password: !!o.password, error }, null)
+      if (v === undefined || v === null) return undefined
+      const err = o.validateInput ? o.validateInput(String(v)) : null
+      if (!err) return String(v)
+      value = o.password ? '' : String(v)
+      error = err
+    }
+  },
+  async ask(spec) {
+    const v = await asker(Object.assign({ rich: true }, spec), null)
+    if (v === undefined || v === null) return undefined
+    const o = typeof v === 'object' ? v : { value: v }
+    if (spec.kind === 'account') {
+      return { label: typeof o.value === 'string' ? o.value.trim().slice(0, 40) : '', color: o.color, icon: o.icon }
+    }
+    if (Array.isArray(spec.buttons) && spec.buttons.includes(o.value)) return { value: o.value, checked: o.checked, text: o.text }
+    if (o.closed === true && spec.cancel === false && (spec.check || spec.field)) return { value: null, closed: true, checked: o.checked, text: o.text }
+    return undefined
+  },
+  account(spec) { return ui.ask(Object.assign({ kind: 'account' }, spec)) },
+  async choose(opts) {
+    const o = opts || {}
+    const buttons = (o.buttons || []).filter((b) => typeof b === 'string' && b)
+    if (!buttons.length) return undefined
+    const v = await asker({ kind: 'confirm', tone: o.tone || 'info', title: o.title || '', message: o.message || '', buttons }, null)
+    return typeof v === 'string' && buttons.includes(v) ? v : undefined
+  },
+}
+
+let noticesInPage = true
+const notes = new Map()
+let noteSeq = 0
+const VSCODE_SHOW = { info: 'showInformationMessage', warn: 'showWarningMessage', error: 'showErrorMessage' }
+
+function notify(tone, text, ...rest) {
+  const opts = rest.length && rest[0] && typeof rest[0] === 'object' ? rest.shift() : null
+  const buttons = rest.filter((b) => typeof b === 'string' && b)
+  if (opts && opts.modal) {
+    if (!buttons.length) return ui.choose({ tone, title: String(text), message: opts.detail || '', buttons: ['OK'] }).then(() => undefined)
+    return ui.choose({ tone, title: String(text), message: opts.detail || '', buttons })
+  }
+  const pages = noticesInPage ? [panel && panel.visible && panel.webview, view && view.visible && view.webview].filter(Boolean) : []
+  if (!pages.length) return Promise.resolve(vscode.window[VSCODE_SHOW[tone] || VSCODE_SHOW.info](text, ...(opts ? [opts] : []), ...buttons))
+  const id = ++noteSeq
+  return new Promise((resolve) => {
+    notes.set(id, { resolve, buttons })
+    for (const w of pages) w.postMessage({ type: 'note', id, tone, text: String(text), buttons }).then(() => {}, () => {})
+  })
+}
+
+function endNote(id, label) {
+  const n = notes.get(id)
+  if (!n) return
+  notes.delete(id)
+  for (const w of pageWebviews()) w.postMessage({ type: 'noteDone', id }).then(() => {}, () => {})
+  n.resolve(typeof label === 'string' && n.buttons.includes(label) ? label : undefined)
+}
+
 const PAGE_ACTIONS = {
-  ready: () => postState(),
-  switch: (m) => switchTo(m.name),
+  ready: () => { postState(); postAsks() },
+  note: (m) => endNote(m.id, m.label),
+  answer: (m) => {
+    const a = asks.get(m.id)
+    if (!a) return
+    let v
+    if (!m.cancel) {
+      if (m.closed === true) {
+        v = a.spec.kind === 'confirm' && a.spec.rich && a.spec.cancel === false && (a.spec.check || a.spec.field)
+          ? { value: null, closed: true, checked: typeof m.checked === 'boolean' ? m.checked : undefined, text: typeof m.text === 'string' ? m.text.slice(0, 200) : undefined }
+          : undefined
+      } else if (a.spec.kind === 'pick') v = Number.isInteger(m.index) && m.index >= 0 && m.index < a.spec.items.length ? m.index : undefined
+      else if (a.spec.kind === 'confirm' && a.spec.buttons && a.spec.rich) {
+        v = a.spec.buttons.includes(m.value)
+          ? { value: m.value, checked: typeof m.checked === 'boolean' ? m.checked : undefined, text: typeof m.text === 'string' ? m.text.slice(0, 200) : undefined }
+          : undefined
+      } else if (a.spec.kind === 'confirm' && a.spec.buttons) v = a.spec.buttons.includes(m.value) ? m.value : undefined
+      else if (a.spec.kind === 'account') {
+        v = typeof m.value === 'string' ? { value: m.value.slice(0, 200), color: typeof m.color === 'string' ? m.color : undefined, icon: typeof m.icon === 'string' ? m.icon : undefined } : undefined
+      } else if (a.spec.kind === 'checks') v = m.value === 'fix' && Number.isInteger(m.index) ? { value: 'fix', index: m.index } : m.value === 'again' ? { value: 'again' } : undefined
+      else if (a.spec.kind === 'signin') v = undefined
+      else if (a.spec.kind === 'confirm') v = m.value === 'yes' ? true : undefined
+      else v = typeof m.value === 'string' ? m.value.slice(0, 1000) : undefined
+    }
+    endAsk(m.id, v)
+  },
+  switch: async (m) => {
+    if (m.confirmed === true) {
+      if (m.dontAsk === true) await setConfirmOrgSwitch(false)
+      await switchTo(m.name)
+    } else if (await confirmOrgSwitch(m.name)) await switchTo(m.name)
+    else postState()
+  },
+  learnMore: () => { vscode.env.openExternal(vscode.Uri.parse(PRESERVED_THINKING_URL)) },
+  welcomeDone: () => {
+    if (extContext && extContext.globalState && version) extContext.globalState.update(SEEN_KEY, version).then(() => postState(), () => {})
+  },
+  setting: (m) => { setPref(m.key, m.value).then(() => postState(), () => {}) },
   add: () => addAccount(),
   saveCurrent: () => saveCurrentLogin(),
   update: () => refreshAllAccounts(),
   edit: (m) => {
     if (profilesLib.exists(root(), m.name) && !editAccount(m.name, m.label, m.icon, m.color)) {
-      vscode.window.showWarningMessage('Use a display name of 1–40 characters.')
+      notify('warn', 'Use a display name of 1–40 characters.')
     }
   },
   remote: (m) => setRemoteFor(m.name, m.on === true),
   artifacts: (m) => { if (editionLib.hasFeature(edition, 'artifacts')) setArtifactsFor(m.name, m.on === true) },
-  relogin: (m) => relogin(m.name),
+  relogin: (m) => relogin(m.name, m.which === 'pinning' ? 'pinning' : 'main'),
+  addPinning: (m) => addPinning(m.name),
+  signinCode: (m) => {
+    const take = signinCodes.get(m.id)
+    if (take && typeof m.code === 'string' && m.code.trim() && m.code.length < 2000) take(m.code.trim())
+  },
+  copy: (m) => { if (typeof m.text === 'string' && m.text.length < 4000) return vscode.env.clipboard.writeText(m.text) },
+  movePin: (m) => movePin(m),
+  reopenNow: (m) => { if (chatPins.validId(m.id)) return reopenNow(m.id) },
+  checkAll: () => checkAll(),
+  checklistDone: () => {
+    if (extContext && extContext.globalState) return extContext.globalState.update(CHECKLIST_KEY, true).then(() => postState(), () => {})
+  },
   forget: (m) => forgetAccount(m.name),
-  windowLogin: (m) => windowLogin(m.name),
   forgetWindowLogin: (m) => forgetWindowLogin(m.name),
   spareLogin: (m) => (editionLib.hasFeature(edition, 'spareLogin') ? makeSpareLogin(m.name) : null),
   moveOut: (m) => (editionLib.hasFeature(edition, 'transfer') ? moveToAnotherPC(m.name) : null),
@@ -2089,8 +3491,10 @@ const PAGE_ACTIONS = {
     if (typeof m.id !== 'string' || m.id.length > 200) return
     autoLib.updateState(root(), (s) => { if (s.stops[m.id] && s.stops[m.id].state === 'waiting') s.stops[m.id].state = 'cancelled' })
   },
-  pin: () => pinFolder(),
+  pin: (m) => pinFolder(m.name),
   unpin: (m) => unpinFolder(m.folder),
+  pinChat: (m) => pinChat(m.name),
+  unpinChat: (m) => { if (chatPins.validId(m.id)) return unpinChat(m.id) },
   status: () => showStatus(),
   openConfig: () => openConfigFile(),
   openTab: () => openAccountsTab(),
@@ -2107,7 +3511,7 @@ async function onPageMessage(msg) {
     await PAGE_ACTIONS[msg.type](msg)
   } catch (e) {
     log('page action ' + msg.type + ' failed: ' + (e && e.stack))
-    vscode.window.showErrorMessage('Claude Accounts: ' + (e && e.message))
+    notify('error', 'Claude Accounts: ' + (e && e.message))
   } finally {
     if (msg.type !== 'ready') postState()
   }
@@ -2119,8 +3523,13 @@ function openAccountsTab() {
     postState()
     return
   }
-  panel = vscode.window.createWebviewPanel('claudeswitcher.accounts', 'Claude Accounts',
-    { viewColumn: vscode.ViewColumn.Active, preserveFocus: false }, webviewOptions())
+  setUpAccountsTab(vscode.window.createWebviewPanel(PANEL_TYPE, 'Claude Accounts',
+    { viewColumn: vscode.ViewColumn.Active, preserveFocus: false }, webviewOptions()))
+}
+
+function setUpAccountsTab(p) {
+  panel = p
+  panel.webview.options = webviewOptions()
   panel.iconPath = {
     light: vscode.Uri.file(path.join(mediaDir(), 'tab-light.svg')),
     dark: vscode.Uri.file(path.join(mediaDir(), 'tab-dark.svg')),
@@ -2133,7 +3542,7 @@ function openAccountsTab() {
     if (shown && !wasVisible) postState()
     wasVisible = shown
   })
-  panel.onDidDispose(() => { panel = null })
+  p.onDidDispose(() => { if (panel === p) panel = null; cancelAsksIfNoPage() })
 }
 
 async function openAccountsSidebar() {
@@ -2154,7 +3563,7 @@ const viewProvider = {
     webviewView.webview.html = pageHtml(webviewView.webview, 'sidebar')
     webviewView.webview.onDidReceiveMessage(onPageMessage)
     webviewView.onDidChangeVisibility(() => { if (view && view.visible) postState() })
-    webviewView.onDidDispose(() => { if (view === webviewView) view = null })
+    webviewView.onDidDispose(() => { if (view === webviewView) view = null; cancelAsksIfNoPage() })
   },
 }
 
@@ -2168,13 +3577,13 @@ function oldCopyInstalled(context) {
 }
 
 function deferToOldCopy(old) {
-  vscode.window.showWarningMessage('Switcher for Claude Code is installed twice: an older copy (' + old + ') is still there, ' +
+  notify('warn', 'Switcher for Claude Code is installed twice: an older copy (' + old + ') is still there, ' +
     'and runs instead of this one. Uninstall it and reload to finish the update. Your saved accounts stay as they are.',
   'Uninstall Old Copy')
     .then(async (pick) => {
       if (pick !== 'Uninstall Old Copy') return
       await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', old)
-      const next = await vscode.window.showInformationMessage('Uninstalled the old copy. Reload to start the new one.', 'Reload Window')
+      const next = await notify('info', 'Uninstalled the old copy. Reload to start the new one.', 'Reload Window')
       if (next === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow')
     })
     .then(() => {}, () => {})
@@ -2191,25 +3600,22 @@ function activate(context) {
   pinState = null
   applyPin()
 
+  process.env[chatPins.ENV] = chatPins.wrapperFile(root())
+
   const claudeExt = vscode.extensions && vscode.extensions.getExtension('anthropic.claude-code')
-  if (claudeExt) claude.addBundledHint(claudeExt.extensionPath)
+  if (claudeExt) { claude.addBundledHint(claudeExt.extensionPath); claudeExtPath = claudeExt.extensionPath }
 
   output = vscode.window.createOutputChannel('Switcher for Claude Code')
   context.subscriptions.push(output)
   if (pinState) {
     log('folder pin: ' + JSON.stringify({ source: pinState.source, name: pinState.name, ready: pinState.ready,
-      problem: pinState.problem, claudeWasActive: pinState.claudeWasActive, error: pinState.error }))
+      problem: pinState.problem, error: pinState.error }))
   }
-  if (pinState && pinState.problem === 'login-unknown') {
-    vscode.window.showWarningMessage('This folder is pinned to "' + pinState.name + '", but its window login couldn\'t be ' +
-      'checked (the Keychain may be locked). The window uses the pinned account; if Claude Code says it is signed out, ' +
-      'unlock the Keychain and reload.')
-  }
-  if (pinState && pinState.problem === 'no-login') {
+  if (pinState && pinState.problem === 'no-pinning') {
     const n = pinState.name
-    vscode.window.showWarningMessage('This folder is pinned to "' + n + '", which has no window login yet, ' +
-      'so this window is using the global account.', 'Sign In Now').then((c) => {
-      if (c === 'Sign In Now') vscode.commands.executeCommand('claudeswitcher.windowLogin', n)
+    notify('warn', 'This folder is pinned to "' + labelOf(n) + '", which has no pinning login, ' +
+      'so chats here use the active account.', 'Add account for pinning').then((c) => {
+      if (c === 'Add account for pinning') addPinning(n).catch((e) => log('pinning: ' + (e && e.message)))
     }, () => {})
   }
 
@@ -2234,6 +3640,16 @@ function activate(context) {
   usageBar.command = 'claudeswitcher.refreshAllAccounts'
   usageBar.name = 'Claude Usage'
   context.subscriptions.push(usageBar)
+  daysBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98)
+  daysBar.name = 'Claude Login Days'
+  daysBar.command = 'claudeswitcher.openAccounts'
+  pinDaysBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97)
+  pinDaysBar.name = 'Claude Pinning Login Days'
+  pinDaysBar.command = 'claudeswitcher.openAccounts'
+  context.subscriptions.push(daysBar, pinDaysBar)
+  if (vscode.window.tabGroups && vscode.window.tabGroups.onDidChangeTabs) {
+    context.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(() => { updateUsageBar(); updateStatusBar() }))
+  }
 
   contextBar = null
   if (editionLib.hasFeature(edition, 'context')) {
@@ -2243,20 +3659,29 @@ function activate(context) {
   }
 
   const cmds = {
-    openAccounts, globalSwitch, globalAdd: addAccount, pinFolder, refreshAllAccounts, showStatus,
-    switchTo, refreshUsage, relogin, windowLogin, openAccountsTab, startSession: startSessionFor,
+    openAccounts, globalSwitch, globalAdd: addAccount, pinFolder, pinChat, refreshAllAccounts, showStatus,
+    switchTo, refreshUsage, relogin, openAccountsTab, startSession: startSessionFor,
   }
   for (const id of Object.keys(cmds)) {
     if (!editionLib.includes(edition, id)) continue
     context.subscriptions.push(vscode.commands.registerCommand('claudeswitcher.' + id, (...args) =>
       Promise.resolve(cmds[id](...args)).catch((e) => {
         log(id + ' failed: ' + (e && e.stack))
-        vscode.window.showErrorMessage('Claude Accounts: ' + (e && e.message))
+        notify('error', 'Claude Accounts: ' + (e && e.message))
       })))
   }
 
   if (vscode.window.registerWebviewViewProvider) {
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(VIEW_ID, viewProvider))
+  }
+  if (vscode.window.registerWebviewPanelSerializer) {
+    context.subscriptions.push(vscode.window.registerWebviewPanelSerializer(PANEL_TYPE, {
+      deserializeWebviewPanel: async (p) => {
+        if (panel && panel !== p) { p.dispose(); return }
+        setUpAccountsTab(p)
+        postState()
+      },
+    }))
   }
 
   try { applyPreferences(profilesLib.activeProfile(root())) } catch (e) { log('remote and artifacts prefs: ' + e.message) }
@@ -2269,7 +3694,7 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => clearTimeout(privacyTimer) })
   const recovered = syncStagedLogins()
   if (recovered.length) {
-    vscode.window.showInformationMessage('Added to the account switcher: ' + recovered.join(', ') + '.')
+    notify('info', 'Added to the account switcher: ' + recovered.join(', ') + '.')
   }
 
   try {
@@ -2301,8 +3726,30 @@ function activate(context) {
   }))
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('claudeswitcher.trackAllAccounts')) { refreshAll(); trackerTick() }
+    if (e.affectsConfiguration('claudeswitcher')) { updateStatusBar(); updateUsageBar(); postState() }
   }))
 
+  try {
+    wrapperPath = chatPins.installWrapper(root(), extensionPath)
+    syncPins().catch((e) => log('pins: ' + (e && e.message)))
+  } catch (e) { log('chat pins: installing the wrapper: ' + (e && e.message)) }
+
+  try { cleanupSigninDirs() } catch (e) { log('sign-in cleanup: ' + (e && e.message)) }
+  startupLogins().then(() => { afterLoginChange(); writePinnedSettingsAll() }, (e) => log('logins: ' + (e && e.message)))
+  const loginTimer = setInterval(() => { loginWatch().catch((e) => log('login watch: ' + (e && e.message))) }, LOGIN_WATCH_MS)
+  const loginChangeTimer = setInterval(() => { fastTick().catch((e) => log('/login watch: ' + (e && e.message))) }, WAITING_CHECK_MS)
+  context.subscriptions.push({ dispose: () => {
+    clearInterval(loginChangeTimer)
+    clearInterval(loginTimer)
+    if (loginWatchSoon) { clearTimeout(loginWatchSoon); loginWatchSoon = null }
+  } })
+  if (context.globalState && context.globalState.get(SEEN_KEY) === undefined && context.globalState.get(CHECKLIST_KEY) === undefined &&
+    !profilesLib.list(root()).length) {
+    Promise.resolve(context.globalState.update(CHECKLIST_KEY, 'show')).then(() => postState(), () => {})
+  }
+
+  const welcomeTimer = setTimeout(() => { offerWelcome().catch((e) => log('welcome: ' + (e && e.message))) }, 4000)
+  context.subscriptions.push({ dispose: () => clearTimeout(welcomeTimer) })
   const firstTick = setTimeout(trackerTick, 20000)
   const trackerTimer = setInterval(trackerTick, 5 * 60 * 1000)
   context.subscriptions.push({ dispose: () => { clearTimeout(firstTick); clearInterval(trackerTimer) } })
@@ -2319,12 +3766,25 @@ function stopLoginWatchers() {
 function deactivate() {
   if (usageTimer) clearInterval(usageTimer)
   stopLoginWatchers()
+  try { signinLib.cancelAll() } catch {  }
 }
 
 module.exports = {
   activate,
   deactivate,
   _test: {
+    setAsker: (fn) => { asker = fn || askViaPage },
+    setSigninStart: (fn) => { signinStart = fn || ((o) => signinLib.start(o)) },
+    uiAsk: (spec) => ui.ask(spec),
+    dropSigninDir,
+    setSigninDropRetryMs: (list) => { signinDropRetryMs = list || [6000, 30000] },
+    openAsks: () => [...asks].map(([id, a]) => ({ id, spec: a.spec })),
+    loginWatch, checkAll, startupLogins, writePinnedSettings, loginChangeTick, fastTick,
+    loginChangeMs: () => LOGIN_CHANGE_MS,
+    setIdentityDelayMs: (ms) => { identityWaitMs = ms },
+    takeoutsPending: () => [...takeouts.keys()], syncPins,
+    setNoticesInPage: (on) => { noticesInPage = !!on },
+    notify,
     stopLoginWatchers,
     syncStagedLogins,
     cleanupSpares,

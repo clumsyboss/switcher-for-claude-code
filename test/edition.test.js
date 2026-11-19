@@ -33,12 +33,12 @@ const hidden = new Set((base.contributes.menus.commandPalette || [])
 const visible = edition.MAIN_COMMANDS.filter((id) => !hidden.has(id))
 check('visible: ' + visible.join(', '),
   visible.slice().sort().join(',') ===
-    ['openAccounts', 'globalSwitch', 'globalAdd', 'pinFolder', 'refreshAllAccounts', 'showStatus'].sort().join(','))
-for (const id of ['openAccounts', 'globalSwitch', 'globalAdd', 'pinFolder', 'refreshAllAccounts', 'showStatus']) {
+    ['openAccounts', 'globalSwitch', 'globalAdd', 'pinFolder', 'pinChat', 'refreshAllAccounts', 'showStatus'].sort().join(','))
+for (const id of ['openAccounts', 'globalSwitch', 'globalAdd', 'pinFolder', 'pinChat', 'refreshAllAccounts', 'showStatus']) {
   check(id + ' ships in the release', edition.includes(edition.MAIN, id))
 }
 check('the hidden ones are still registered, for clicks and buttons',
-  ['switchTo', 'refreshUsage', 'relogin', 'windowLogin', 'openAccountsTab'].every((id) => edition.includes(edition.MAIN, id)))
+  ['switchTo', 'refreshUsage', 'relogin', 'openAccountsTab'].every((id) => edition.includes(edition.MAIN, id)))
 
 console.log('\n-- what the clean-up removed is gone from both --')
 for (const id of ['usePerWindowAccounts', 'useMachineWideAccount', 'openWindowAs', 'newTerminalAs', 'newChatAs',

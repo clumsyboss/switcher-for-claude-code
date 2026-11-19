@@ -202,6 +202,22 @@ check('every shared folder still exists', windows.SHARED.every((x) => fs.existsS
 check('the global settings are untouched', JSON.parse(fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8')).disableRemoteControl === true)
 check('removing again is harmless', windows.remove(ROOT, 'Work', OPTS) === false)
 
+console.log('\n-- a window login that has ended --')
+{
+  const dir = windows.prepare(ROOT, 'Idle', OPTS)
+  const write = (oauth) => fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: oauth }))
+  write({ accessToken: 'A', refreshToken: 'R', refreshTokenExpiresAt: Date.now() + 86400e3 })
+  check('signed in, with time left: ready', windows.loginState(ROOT, 'Idle', OPTS) === 'yes' && windows.hasLogin(ROOT, 'Idle', OPTS))
+  write({ accessToken: 'A', refreshToken: 'R', refreshTokenExpiresAt: Date.now() - 1000 })
+  check('past its end date: expired, and not ready', windows.loginState(ROOT, 'Idle', OPTS) === 'expired' && !windows.hasLogin(ROOT, 'Idle', OPTS))
+  write({ accessToken: 'A' })
+  check('no renewal token left: expired', windows.loginState(ROOT, 'Idle', OPTS) === 'expired')
+  store.setPin(ROOT, path.join(HOME, 'idle-folder'), 'Idle')
+  const d = windows.decide(ROOT, path.join(HOME, 'idle-folder'), {}, OPTS)
+  check('a folder pinned to it stays on the global account, saying why', d.ready === false && d.problem === 'login-expired')
+  store.setPin(ROOT, path.join(HOME, 'idle-folder'), null)
+}
+
 fs.rmSync(HOME, { recursive: true, force: true })
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 assert.strictEqual(failed, 0, 'window login tests failed')

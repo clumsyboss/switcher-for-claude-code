@@ -1,0 +1,28 @@
+# Runs the whole test suite on every push and pull request.
+# The public repo (switcher-for-claude-code) tests on Windows and macOS, which is
+# free for public repos. The private source repo tests on Windows only, since macOS
+# minutes on a private repo count ten times against the monthly allowance.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ github.repository == 'clumsyboss/switcher-for-claude-code' && fromJSON('["windows-latest", "macos-latest"]') || fromJSON('["windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
