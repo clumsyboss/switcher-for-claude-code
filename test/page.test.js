@@ -141,7 +141,7 @@ check('its tooltip says what pressing it does, with the matching drawing; its na
   /btn\.setAttribute\('aria-label', 'Compact view'\)/.test(js) && !/setAttribute\('aria-label', what\)/.test(js) &&
   /icon\(on \? 'unfold' : 'fold', 'sm'\)/.test(js) &&
   /\n    fold: '<path/.test(js) && /\n    unfold: '<path/.test(js))
-check('off by default, and saved as a page setting', /askSecondLogin: true, compact: false \}/.test(js) &&
+check('off by default, and saved as a page setting', /askSecondLogin: true, compact: false, validity: true \}/.test(js) &&
   /send\('setting', \{ key: 'compact', value: on \}\)/.test(js))
 check('reduced motion (the system\'s or VS Code\'s) changes the view at once',
   /matchMedia\('\(prefers-reduced-motion: reduce\)'\)\.matches/.test(js) && /vscode-reduce-motion/.test(js) &&

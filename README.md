@@ -856,7 +856,7 @@ installing one replaces the other, so you can never end up with two status bars
 fighting over the same account store.
 
 ```powershell
-npm test              # about 1,650 tests, no network, no touching your real ~/.claude
+npm test              # about 1,700 tests, no network, no touching your real ~/.claude
 npm run stage         # build both editions into dist/ without packaging
 npm run package       # both .vsix files into dist/
 npm run package:main  # just the release

@@ -20,7 +20,7 @@
   let acEditing = false
 
   const PREF_DEFAULTS = { tint: true, context: false, plan: true, cardToggles: true, statusLoginDays: true,
-    statusUsage: true, trackAll: true, accountsView: 'tab', confirmOrgSwitch: true, askSecondLogin: true, compact: false }
+    statusUsage: true, trackAll: true, accountsView: 'tab', confirmOrgSwitch: true, askSecondLogin: true, compact: false, validity: true }
   function pref(k) { const p = (state && state.prefs) || {}; return k in p ? p[k] : PREF_DEFAULTS[k] }
   const barWidth = new Map()
   let uidSeq = 0
@@ -284,6 +284,7 @@
       sw('context', 'Context usage on cards', 'The faint grid showing how full the latest chat is'),
       sw('plan', 'Plan and organisation'),
       sw('cardToggles', 'Remote Control and Artifacts switches'),
+      sw('validity', 'Show login validity around each card', 'A thin line around each card that shrinks as its main login runs out. Off: the active account’s card gets a green line instead'),
       h('hr'),
       head('Status bar'),
       sw('statusUsage', 'Usage figures'),
@@ -500,7 +501,7 @@
     return h('article', { class: 'card' + (a.active ? ' live' : '') + (justLive ? ' just-live' : '') + (pref('tint') ? ' tinted' : ''),
       style: { '--hue': hueOf(a) }, 'aria-label': named + (days ? '. ' + days : ''), 'data-named': named,
       'data-main': typeof a.loginExpiresAt === 'number' ? String(a.loginExpiresAt) : null, 'data-pin': pinField(a) === null ? null : String(pinField(a)) },
-      validityStroke(a),
+      pref('validity') === false ? null : validityStroke(a),
       h('div', { class: 'card-head', title: days || null }, avatar(a, 'avatar'),
         h('div', { class: 'ident' },
           h('div', { class: 'name-row' }, h('div', { class: 'name', text: a.label, 'data-who': who || null, title: [who, days].filter(Boolean).join('\n') || null }),
@@ -1722,6 +1723,7 @@
     if (!state) return
     if (cvAnim) { cvPending = true; return }
     docEl.classList.toggle('compact-view', compactWanted())
+    docEl.classList.toggle('no-validity', pref('validity') === false)
     const s = state
     const updating = s.updating || busy.has('update')
     const accounts = s.accounts || []

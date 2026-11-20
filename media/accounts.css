@@ -771,6 +771,9 @@ body:not(.vscode-high-contrast):not(.vscode-high-contrast-light) .card.live {
 .vstroke .vs-line { stroke: var(--vs, color-mix(in srgb, var(--foreground) 42%, transparent)); transition: stroke .2s; }
 body.vscode-light .vstroke .vs-line { stroke: var(--vs, color-mix(in srgb, var(--foreground) 34%, transparent)); }
 
+html.no-validity body:not(.vscode-high-contrast):not(.vscode-high-contrast-light) .card.live {
+  border-color: color-mix(in srgb, var(--live) 62%, transparent); box-shadow: var(--shadow); }
+
 html.compact-view { --cvo: 1; --row-pad: 4.5px; }
 html.compact-view .card { padding: 7.5px; gap: 6px; }
 html.compact-view body.layout-sidebar .card { padding: 6px; gap: 5px; }

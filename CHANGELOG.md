@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.2
+
+- **A pinned chat renewing its login no longer loses the account's pinning login.** Every few hours a pinned chat renews its login, which moves the login's end date by a few thousandths of a second. 1.4.0 and 1.4.1 took that for a new sign-in as your active account: the account lost its pinning login, its pinned chats started on the active account, and a warning offered to use the login for the active account or discard it. A renewal is now just a renewal: nothing is asked, and the pinning login keeps its pinned chats and folders going. The same goes for a renewal of your main login, and of a login that is waiting for your answer.
+- **A pinning login set aside by that mistake can come back.** If one is still waiting for your answer, Switcher now recognises it in almost every case, and the question offers **Keep it as** the account's **pinning login** or **Discard it** instead of giving it to your active account. In the rare case it can't tell, it still asks the earlier question: if that names an account you didn't sign in as in that chat, choose **Discard it**.
+- **Your active account's details stay right in Claude Code's settings.** A pinned chat's renewal can write some of the pinned account's details there; Switcher now puts the active account's back, as it already did after a `/login` in a pinned chat.
+- **Auto-continue: a late Cancel no longer stops a chat that was already continued.** The "It will continue … at" notice can stay in VS Code's corner after the wait is over; tapping its **Cancel** then does nothing.
+- **A new setting, Show login validity around each card** (in the page's settings menu, on by default). Turn it off to drop the thin line around each card that shows how long its login has left; the active account's card then gets a thin green line all the way round instead.
+
 ## 1.4.1
 
 - **Keep alive works again,** and so do **▶** (start a 5-hour session) and auto-continue's note to a chat. Current Claude Code waits for typed input when it's started in the background, so each of these runs failed with a "no stdin data received" warning. They now tell Claude Code at once that no input is coming, and that warning is never reported as the error.

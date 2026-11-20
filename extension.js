@@ -381,6 +381,7 @@ const PREFS = {
   accountsView: { key: 'accountsView', def: 'tab', values: ['tab', 'sidebar'] },
   askSecondLogin: { state: 'claudeswitcher.askSecondLogin', def: true },
   compact: { state: 'claudeswitcher.compactView', def: false },
+  validity: { state: 'claudeswitcher.validityStroke', def: true },
 }
 
 function prefOf(name) {
@@ -679,7 +680,22 @@ function waitForReset(entry, subject) {
   postState()
   notify('info', subject + ' will continue "' + entry.title + '" at ' + clockText(entry.resetAt) +
     (entry.to ? ' on ' + labelOf(entry.to) + ', the first account with room again.' : ', when the limit resets.'), 'Cancel').then((pick) => {
-    if (pick === 'Cancel') { autoLib.mark(root(), entry.id, { state: 'cancelled' }); postState() }
+    if (pick === 'Cancel') cancelWait(entry)
+  }, () => {})
+}
+
+function cancelWait(entry) {
+  const cancelled = autoLib.updateState(root(), (s) => {
+    const cur = s.stops[entry.id]
+    if (!cur || cur.state !== 'waiting' || cur.resetAt !== entry.resetAt) return false
+    s.stops[entry.id] = { ...cur, state: 'cancelled' }
+    return true
+  })
+  if (cancelled) { postState(); return }
+  if (cancelled === false) { log('auto-continue: Cancel on "' + entry.title + '" came after its wait was over; nothing to cancel'); return }
+  log('auto-continue: Cancel on "' + entry.title + '": auto-continue was busy; not cancelled')
+  notify('warn', 'Switcher couldn\'t cancel continuing "' + entry.title + '" just now (busy).', 'Try again').then((pick) => {
+    if (pick === 'Try again') cancelWait(entry)
   }, () => {})
 }
 
@@ -2148,7 +2164,7 @@ async function claudeLoginCheck() {
   const name = profilesLib.findSameAccount(root(), snap, null)
   if (!name) { refreshAll(); return }
   const savedEnd = profilesLib.readMeta(root(), name).loginExpiresAt
-  if (typeof savedEnd === 'number' && end <= savedEnd) return
+  if (typeof savedEnd === 'number' && (end <= savedEnd || loginsLib.sameLoginEnd(end, savedEnd))) return
   const release = await lockAccount(name)
   if (!release) { log('/login: "' + name + '" is locked; next time'); loginStamps.delete(''); return }
   let prevEnd = null
@@ -2160,15 +2176,23 @@ async function claudeLoginCheck() {
     const old = profilesLib.readPayload(root(), name)
     const prev = old && old.credentials
     prevEnd = profilesLib.loginExpiresAt(prev)
-    if (oauthRt(prev) === snap.refreshToken || (prevEnd && prevEnd === newEnd)) return
+    if (oauthRt(prev) === snap.refreshToken || (prevEnd && loginsLib.sameLoginEnd(prevEnd, newEnd))) return
     const pin = pinningOf(name)
     const wasActive = lastActive === null ? true : lastActive === name
     if (wasActive) log('/login: "' + name + '" was the active account; its previous login is not kept for pinning')
+    let oldSignedInAt = null
+    try { oldSignedInAt = profilesLib.readMeta(root(), name).signedInAt } catch { oldSignedInAt = null }
+    if (!Number.isFinite(oldSignedInAt)) oldSignedInAt = null
     const keepOld = !wasActive && usesPinning(name) && oauthRt(prev) && typeof prevEnd === 'number' && prevEnd > Date.now() &&
       (!pin || pin.expiresAt <= Date.now() || prevEnd > pin.expiresAt)
     profilesLib.updateCredentials(root(), name, snap.credentials)
+    try {
+      const pm = profilesLib.readMeta(root(), name)
+      pm.signedInAt = Date.now()
+      profilesLib.writeMeta(root(), name, pm)
+    } catch {  }
     if (keepOld) {
-      const r = await loginsLib.setPinningLogin(root(), name, prev, (old.identity && old.identity.oauthAccount) || null, { lock: heldLock })
+      const r = await loginsLib.setPinningLogin(root(), name, prev, (old.identity && old.identity.oauthAccount) || null, { lock: heldLock, signedInAt: oldSignedInAt })
       moved = !!(r && r.ok)
       if (!moved) log('/login: the previous login of "' + name + '" was not kept for pinning: ' + (r && r.reason))
     }
@@ -2185,33 +2209,70 @@ async function claudeLoginCheck() {
 function liveAccountByLogin(liveCreds) {
   const end = profilesLib.loginExpiresAt(liveCreds)
   if (end) {
-    const hit = profilesLib.list(root()).find((p) => p.loginExpiresAt === end)
-    if (hit) return hit.name
+    const all = profilesLib.list(root())
+    const exact = all.find((p) => p.loginExpiresAt === end)
+    if (exact) return exact.name
+    const mine = lastActive && all.find((p) => p.name === lastActive)
+    if (mine && loginsLib.sameLoginEnd(mine.loginExpiresAt, end)) return lastActive
+    const near = all.filter((p) => loginsLib.sameLoginEnd(p.loginExpiresAt, end))
+    if (near.length === 1) return near[0].name
   }
   return lastActive
 }
 let lastActive = null
 
-function restoreLiveIdentity(active) {
+function liveLoginIs(name) {
+  let live = null
+  try { live = credstore.read(null) } catch { return false }
+  let saved = null
+  try { saved = (profilesLib.readPayload(root(), name) || {}).credentials } catch { saved = null }
+  if (oauthRt(live) && oauthRt(live) === oauthRt(saved)) return true
+  const end = profilesLib.loginExpiresAt(live)
+  if (!end) return false
+  const all = profilesLib.list(root())
+  const exact = all.find((p) => p.loginExpiresAt === end)
+  if (exact) return exact.name === name
+  const me = all.find((p) => p.name === name)
+  if (!me || !loginsLib.sameLoginEnd(me.loginExpiresAt, end)) return false
+  return name === lastActive || all.filter((p) => loginsLib.sameLoginEnd(p.loginExpiresAt, end)).length === 1
+}
+
+function restoreLiveIdentity(active, writers) {
   if (!active || !profilesLib.exists(root(), active)) { log('/login in a pinned chat: no saved active account to put back'); return }
   try {
+    if (!liveLoginIs(active)) { log('pinned chat: the live login isn\'t the saved one of "' + active + '" any more (a switch or a sign-in meanwhile); ~/.claude.json left as it is'); return }
     const identity = (profilesLib.readPayload(root(), active) || {}).identity || {}
     if (!identity.oauthAccount) return
     const file = profilesLib.paths().claudeJson
+    const allowed = [profilesLib.savedWho(root(), active)].concat((writers || []).filter(Boolean))
     for (let attempt = 0; ; attempt++) {
       const { data: cfg, stamp } = fsx.readJsonForWrite(file)
-      const same = profilesLib.IDENTITY_KEYS.every((k) => JSON.stringify(cfg[k]) === JSON.stringify(identity[k]))
+      const o = cfg.oauthAccount && typeof cfg.oauthAccount === 'object' ? cfg.oauthAccount : null
+      const fileWho = { accountUuid: (o && o.accountUuid) || null, email: (o && o.emailAddress) || null }
+      if ((fileWho.accountUuid || fileWho.email) && !allowed.some((w) => profilesLib.sameAccount(w, fileWho))) {
+        log('pinned chat: ~/.claude.json names another account (' + (fileWho.email || fileWho.accountUuid) + ') now; left as it is')
+        return
+      }
+      const same = profilesLib.IDENTITY_KEYS.every((k) => sameJson(cfg[k], identity[k]))
       if (same) return
       for (const k of profilesLib.IDENTITY_KEYS) {
         if (identity[k] !== undefined) cfg[k] = identity[k]
         else delete cfg[k]
       }
+      if (!liveLoginIs(active)) { log('pinned chat: the live login changed just now; ~/.claude.json left as it is'); return }
       try { fsx.writeFileAtomic(file, JSON.stringify(cfg, null, 2), { expect: stamp }); break } catch (e) {
         if (e.code !== 'ECONCURRENTWRITE' || attempt >= 4) throw e
       }
     }
     log('/login in a pinned chat: put "' + active + '" back as the account in use')
   } catch (e) { log('/login in a pinned chat: putting the active account back: ' + (e && e.message)) }
+}
+
+function sameJson(a, b) {
+  if (a === b) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false
+  const ka = Object.keys(a), kb = Object.keys(b)
+  return ka.length === kb.length && ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && sameJson(a[k], b[k]))
 }
 
 async function identityWritten(dir) {
@@ -2227,20 +2288,43 @@ async function identityWritten(dir) {
   }
 }
 
+function pinnedLoginChange(name) {
+  let creds = null
+  try { creds = credstore.read(loginsLib.dirFor(root(), name)) } catch { return null }
+  const meta = loginsLib.readMeta(root(), name)
+  const end = profilesLib.loginExpiresAt(creds)
+  if (!oauthRt(creds) || !meta) return null
+  const known = meta.foreign ? meta.foreign.expiresAt : meta.expiresAt
+  if (end === known) return null
+  const fresh = !meta.foreign && Number.isFinite(meta.signedInAt) && Date.now() - meta.signedInAt < FRESH_SIGNIN_MS
+  if (typeof known === 'number' && loginsLib.sameLoginEnd(end, known) && !fresh) return { renewal: true, end, held: !!meta.foreign }
+  return { creds }
+}
+const FRESH_SIGNIN_MS = 2 * loginsLib.RENEWAL_SLACK_MS
+
+async function pinnedRenewal(name, dir, active) {
+  const release = await lockAccount(name)
+  if (!release) { log('pinning login of "' + name + '": renewed by a chat, but locked; next time'); loginStamps.delete(name); return }
+  let r = null
+  try {
+    const now = pinnedLoginChange(name)
+    if (!now || !now.renewal) { loginStamps.delete(name); return }
+    r = await loginsLib.followRenewal(root(), name, now.end, { lock: heldLock })
+  } finally { release() }
+  if (!r || !r.ok) { log('pinning login of "' + name + '": following its renewal: ' + (r && r.reason)); return }
+  log('pinning login of "' + name + '": renewed by a chat; its end date follows')
+  if (!(loginsLib.readMeta(root(), name) || {}).foreign) await syncPins()
+  if (await identityWritten(dir)) restoreLiveIdentity(active, [profilesLib.savedWho(root(), name)])
+}
+
 async function pinnedLoginCheck(name) {
   const dir = loginsLib.dirFor(root(), name)
-  const isNew = () => {
-    let creds = null
-    try { creds = credstore.read(dir) } catch { return null }
-    const meta = loginsLib.readMeta(root(), name)
-    const end = profilesLib.loginExpiresAt(creds)
-    if (!oauthRt(creds) || !meta) return null
-    if (meta.foreign && meta.foreign.expiresAt === end) return null
-    return end !== meta.expiresAt ? creds : null
-  }
-  if (!isNew()) return
+  const isNew = () => { const c = pinnedLoginChange(name); return c && c.creds ? c.creds : null }
+  const first = pinnedLoginChange(name)
+  if (!first) return
   if (locksLib.isHeld(root(), trackerLib.accountLock(name), trackerLib.LOCK_STALE_MS)) { loginStamps.delete(name); return }
   const active = liveAccountByLogin(credstore.read(null))
+  if (first.renewal) { await pinnedRenewal(name, dir, active); return }
   const written = await identityWritten(dir)
   const cfg = written ? (fsx.readJsonLoose(profilesLib.paths().claudeJson, null) || {}) : {}
   const raw = cfg.oauthAccount && typeof cfg.oauthAccount === 'object' ? cfg.oauthAccount : null
@@ -2262,11 +2346,11 @@ async function pinnedLoginCheck(name) {
       const r = await loginsLib.setPinningLogin(root(), name, creds, raw && !unknown ? raw : null, { lock: heldLock })
       if (!r.ok) { log('/login in a pinned chat of "' + name + '": ' + r.reason); return }
     } else {
-      await loginsLib.holdForeign(root(), name, { expiresAt: profilesLib.loginExpiresAt(creds), oauthAccount: raw }, { lock: heldLock })
+      await loginsLib.holdForeign(root(), name, { expiresAt: profilesLib.loginExpiresAt(creds), oauthAccount: raw, activeWas: active }, { lock: heldLock })
       takeouts.delete(name)
     }
   } finally { release() }
-  restoreLiveIdentity(active)
+  restoreLiveIdentity(active, [who, mine])
   if (!same) await syncPins()
   afterLoginChange()
   const label = labelOf(name)
@@ -2281,6 +2365,9 @@ async function pinnedLoginCheck(name) {
 
 async function askAboutHeld(name, who) {
   const label = labelOf(name)
+  let held = null
+  try { held = loginsLib.foreignOf(root(), name) } catch { held = null }
+  if (held && heldLooksLikeRenewal(name, held, who)) return askAboutHeldRenewal(name, who)
   const other = profilesLib.findSameAccount(root(), who, null)
   const useFor = other && other !== name ? 'Use it for ' + labelOf(other) : null
   const addOwn = 'Add it as its own account'
@@ -2294,6 +2381,62 @@ async function askAboutHeld(name, who) {
   if (!action) { log('/login in a pinned chat of "' + name + '": no answer; the login stays with its chat'); return }
   if (takeouts.has(name)) return
   await takeOutWhenFree(name, { action, other: useFor ? other : null, who, label })
+}
+
+function heldLooksLikeRenewal(name, held, who) {
+  if (profilesLib.sameAccount(profilesLib.savedWho(root(), name), who)) return true
+  if ('activeWas' in held) return false
+  const end = held.expiresAt, since = held.since
+  if (!Number.isFinite(end) || !Number.isFinite(since)) return false
+  if (end - since >= RENEWED_SHORT_OF_MS) return false
+  let signedInAt = null
+  try { signedInAt = (loginsLib.readMeta(root(), name) || {}).signedInAt } catch { signedInAt = null }
+  if (!Number.isFinite(signedInAt) || Math.abs(end - (signedInAt + LOGIN_LIFETIME_MS)) <= LIFETIME_SLACK_MS) return true
+  let active = null
+  try { active = profilesLib.activeProfile(root()) } catch { active = null }
+  return !!active && active !== name && profilesLib.sameAccount(profilesLib.savedWho(root(), active), who)
+}
+const LOGIN_LIFETIME_MS = 30 * 86400000
+const RENEWED_SHORT_OF_MS = LOGIN_LIFETIME_MS - 3600000
+const LIFETIME_SLACK_MS = 2 * 86400000
+
+async function askAboutHeldRenewal(name, who) {
+  const label = labelOf(name)
+  const keep = 'Keep it as ' + label + '\'s pinning login'
+  const whoText = who.email || 'another account'
+  const b = await notify('warn', 'A chat pinned to ' + label + ' renewed ' + label + '\'s pinning login, and an earlier version of Switcher took that for a sign-in as ' +
+    whoText + ' and set the login aside. Until it\'s back, new chats pinned to ' + label + ' start on the active account. ' +
+    keep + '? If you really signed in as ' + whoText + ' in that chat, discard it instead.',
+    keep, 'Discard it')
+  if (b === keep) { await keepHeldAsPinning(name); return }
+  if (b !== 'Discard it') { log('held login of "' + name + '": no answer; the login stays with its chat'); return }
+  if (takeouts.has(name)) return
+  await takeOutWhenFree(name, { action: 'discard', other: null, who, label })
+}
+
+async function keepHeldAsPinning(name) {
+  const label = labelOf(name)
+  const release = await lockAccount(name)
+  if (!release) { notify('warn', label + '\'s login is busy right now. Try again in a minute (Switcher asks again at the next start).'); return }
+  let r = null
+  try {
+    const f = loginsLib.foreignOf(root(), name)
+    let creds = null
+    try { creds = credstore.read(loginsLib.dirFor(root(), name)) } catch { creds = null }
+    if (!f) r = { ok: false, reason: 'not held any more' }
+    else if (!oauthRt(creds) || !loginsLib.sameLoginEnd(profilesLib.loginExpiresAt(creds), f.expiresAt)) r = { ok: false, reason: 'the folder holds another login now' }
+    else {
+      let own = null
+      try { own = ((profilesLib.readPayload(root(), name) || {}).identity || {}).oauthAccount || null } catch { own = null }
+      const signedInAt = (loginsLib.readMeta(root(), name) || {}).signedInAt
+      r = await loginsLib.setPinningLogin(root(), name, creds, own, { lock: heldLock, signedInAt })
+    }
+  } finally { release() }
+  if (!r.ok) { log('held login of "' + name + '": not kept: ' + r.reason); return }
+  log('held login of "' + name + '": kept as its pinning login again')
+  await syncPins()
+  afterLoginChange()
+  notify('info', label + '\'s pinning login is back: pinned chats and folders use it again, good for about ' + daysPhrase(r.expiresAt) + '.')
 }
 
 const heldAsked = new Set()

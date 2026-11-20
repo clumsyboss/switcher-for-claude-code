@@ -302,7 +302,11 @@ async function main() {
   check('the next kind for the same login still fires', due.some((d) => d.name === 'a' && d.kind === 'last-day'))
   const renewedAccounts = [{ name: 'a', main: { expiresAt: NOW + 2 * D }, pinning: null }]
   check('the same login renewed (same end date): still answered', !logins.dueReminders({ now: NOW + 2 * H, accounts: renewedAccounts, state }).length)
-  const newLogin = [{ name: 'a', main: { expiresAt: NOW + 2 * D + 5000 }, pinning: null }]
+  const driftedAccounts = [{ name: 'a', main: { expiresAt: NOW + 2 * D + 37 }, pinning: null }]
+  check('the same login renewed by Claude Code (end date a few ms later): still answered', !logins.dueReminders({ now: NOW + 2 * H, accounts: driftedAccounts, state }).length)
+  const driftedB = [{ name: 'b', main: { expiresAt: NOW + 5 * H }, pinning: { expiresAt: NOW - H - 25 } }]
+  check('and still snoozed after "Not now"', !logins.dueReminders({ now: NOW + H, accounts: driftedB, state }).some((d) => d.which === 'pinning'))
+  const newLogin = [{ name: 'a', main: { expiresAt: NOW + 2 * D + logins.RENEWAL_SLACK_MS + 5000 }, pinning: null }]
   check('a new login (new end date) gets its own reminders', logins.dueReminders({ now: NOW + 2 * H, accounts: newLogin, state }).length === 1)
   const pruned = logins.answerReminder(state, { key: 'z|main|' + (NOW - 40 * D) + '|expired' }, { now: NOW })
   check('reminders for logins long gone are dropped', !Object.keys(pruned.done).some((k) => k.startsWith('z|')))
@@ -605,6 +609,69 @@ async function main() {
   fs.rmSync(heldMarker, { force: true })
   r = await logins.adoptNewLogin(ROOT, 'held', signInDir('held@example.com', login('HP', 35 * D)), { ...X, mode: 'pinning' })
   check('once that chat has ended, the new login replaces it', r.ok && rt(pinned('held')) === 'RT-HP' && !logins.foreignOf(ROOT, 'held') && logins.info(ROOT, 'held').expiresAt === NOW + 35 * D)
+
+  console.log('\n-- a renewal moves the end date by a few ms: still the same login --')
+  const drift = (creds, tag, ms) => ({ claudeAiOauth: { ...creds.claudeAiOauth, accessToken: 'AT-' + tag, refreshToken: 'RT-' + tag,
+    refreshTokenExpiresAt: creds.claudeAiOauth.refreshTokenExpiresAt + ms } })
+  const E = NOW + 20 * D
+  check('sameLoginEnd: equal, a few ms apart either way, and up to the slack', logins.sameLoginEnd(E, E) && logins.sameLoginEnd(E, E + 37) &&
+    logins.sameLoginEnd(E + 37, E) && logins.sameLoginEnd(E, E - 5000) && logins.sameLoginEnd(E, E + logins.RENEWAL_SLACK_MS))
+  check('sameLoginEnd: past the slack, days apart, or unknown: not the same', !logins.sameLoginEnd(E, E + logins.RENEWAL_SLACK_MS + 1) &&
+    !logins.sameLoginEnd(E, E + D) && !logins.sameLoginEnd(E, null) && !logins.sameLoginEnd(null, E) && !logins.sameLoginEnd(E, 'x'))
+  check("the slack: a minute or more, under the few minutes between an account's main and pinning sign-ins", logins.RENEWAL_SLACK_MS >= 60e3 && logins.RENEWAL_SLACK_MS <= 5 * 60e3)
+  {
+    const a = login('WA', 20 * D)
+    const b = login('WB', 30 * D)
+    check('whose: a slot renewed with a drifted end date is still told apart', logins._test.whose(drift(a, 'WA2', 41), a, b) === 'A' &&
+      logins._test.whose(drift(b, 'WB2', -12), a, b) === 'B' && logins._test.whose(login('WC', 40 * D), a, b) === 'other')
+    check('whose: two logins whose ends are within the slack can\'t be told apart by them', logins._test.whose(drift(a, 'WA3', 5), a, drift(a, 'WB3', 20)) === 'unknown')
+    const a5 = login('WD', 20 * D)
+    const b5 = login('WE', 20 * D + 5 * 60e3)
+    check('whose: main and pinning signed in minutes apart are still told apart after a renewal',
+      logins._test.whose(drift(a5, 'WD2', 30), a5, b5) === 'A' && logins._test.whose(drift(b5, 'WE2', -30), a5, b5) === 'B')
+  }
+  {
+    const keep = login('KD1', 20 * D)
+    await logins.setPinningLogin(ROOT, 'kept', keep, account('kept@example.com'), OPTS)
+    credstore.write(keptDir, drift(keep, 'KD1b', 37), OPTS)
+    r = await logins.setPinningLogin(ROOT, 'kept', keep, account('kept@example.com'), OPTS)
+    check('setPinningLogin: a renewal with a drifted end date is never written over with older tokens',
+      r.ok && rt(credstore.read(keptDir, OPTS)) === 'RT-KD1b' && r.expiresAt === NOW + 20 * D + 37, JSON.stringify(r))
+
+    check('setPinningLogin: signed in now unless told otherwise', logins.readMeta(ROOT, 'kept').signedInAt >= NOW)
+    r = await logins.setPinningLogin(ROOT, 'kept', keep, account('kept@example.com'), { ...OPTS, signedInAt: NOW - 9 * D })
+    check('setPinningLogin: an older sign-in time is kept when given (a held login kept again)', r.ok && logins.readMeta(ROOT, 'kept').signedInAt === NOW - 9 * D)
+    r = await logins.setPinningLogin(ROOT, 'kept', keep, account('kept@example.com'), { ...OPTS, signedInAt: null })
+    check('setPinningLogin: an unknown sign-in time given as null stays unknown (not now)', r.ok && logins.readMeta(ROOT, 'kept').signedInAt === null)
+
+    const before = logins.readMeta(ROOT, 'kept')
+    r = await logins.followRenewal(ROOT, 'kept', before.expiresAt + 21, OPTS)
+    const after = logins.readMeta(ROOT, 'kept')
+    check('followRenewal: the end date follows, the rest is unchanged', r.ok && r.changed && after.expiresAt === before.expiresAt + 21 &&
+      JSON.stringify({ ...after, expiresAt: 0 }) === JSON.stringify({ ...before, expiresAt: 0 }), JSON.stringify(after))
+    r = await logins.followRenewal(ROOT, 'kept', after.expiresAt + D, OPTS)
+    check('followRenewal: an end date days away is a new sign-in, not followed', !r.ok && r.reason === 'not-a-renewal' && logins.readMeta(ROOT, 'kept').expiresAt === after.expiresAt)
+    r = await logins.followRenewal(ROOT, 'kept', after.expiresAt + 5, { ...OPTS, lock: async () => null })
+    check('followRenewal: a lock it can\'t get changes nothing', !r.ok && r.reason === 'locked' && logins.readMeta(ROOT, 'kept').expiresAt === after.expiresAt)
+    r = await logins.followRenewal(ROOT, 'nobody', NOW, OPTS)
+    check('followRenewal: no meta, nothing to follow', !r.ok && r.reason === 'no-login')
+    await logins.holdForeign(ROOT, 'kept', { expiresAt: NOW + 30 * D, oauthAccount: account('x@example.com'), activeWas: 'work' }, OPTS)
+    const f0 = logins.foreignOf(ROOT, 'kept')
+    check('holdForeign records which account was active then', f0.activeWas === 'work')
+    r = await logins.followRenewal(ROOT, 'kept', NOW + 30 * D - 15, OPTS)
+    const f1 = logins.foreignOf(ROOT, 'kept')
+    check('followRenewal: a held login\'s end date follows, still held, still no pinning login',
+      r.ok && f1.expiresAt === NOW + 30 * D - 15 && f1.since === f0.since && logins.info(ROOT, 'kept') === null)
+    await logins.remove(ROOT, 'kept', OPTS)
+  }
+  {
+    const other2 = login('HD', 30 * D)
+    credstore.write(pinDir('held'), other2, OPTS)
+    await logins.holdForeign(ROOT, 'held', { expiresAt: NOW + 30 * D, oauthAccount: account('x@example.com') }, OPTS)
+    credstore.write(pinDir('held'), drift(other2, 'HD2', 29), OPTS)
+    r = await logins.takeOutForeign(ROOT, 'held', null, OPTS)
+    check('takeOutForeign: a held login its chat renewed (end date a few ms later) is still taken out, not "changed"', r.ok && !logins.hasLogin(ROOT, 'held', OPTS), JSON.stringify(r))
+  }
 
   console.log('\n-- how often to look for /login --')
   check('macOS: every 30 seconds (each look runs the security tool)', logins.loginCheckMs('darwin') === 30000)

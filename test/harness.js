@@ -944,6 +944,39 @@ async function main() {
   check('and a second stop record in the same chat is the same episode, not a new one', stateOf('stop-t2') === undefined)
   await ext._test.onPageMessage({ type: 'switch', name: prevLive })
 
+  store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+  {
+    let tap = null
+    writeChat(startOf().concat([stopRec('stop-l')]))
+    liveSession('idle')
+    ext._test.refreshContext()
+    q.info.push(new Promise((r) => { tap = r }))
+    await ext._test.checkLimits()
+    check('(a wait, its notice still showing)', stateOf('stop-l') === 'waiting')
+    await ext._test.checkLimits()
+    check('(the limit had reset: continued)', stateOf('stop-l') === 'sent')
+    tap('Cancel')
+    await tick()
+    check('a late tap on the waiting notice\'s Cancel doesn\'t cancel a chat already continued', stateOf('stop-l') === 'sent', stateOf('stop-l'))
+    writeChat(startOf().concat([stopRec('stop-m', Date.now() + 2 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(new Promise((r) => { tap = r }))
+    await ext._test.checkLimits()
+    const held = require('../lib/locks').acquireSync(TEST_ROOT, 'autocontinue', { staleMs: 60000, waitMs: 0 })
+    let retry = null
+    q.warn.push(new Promise((r) => { retry = r }))
+    const nb = messages.length
+    tap('Cancel')
+    await tick()
+    if (held) held()
+    const busy = messages.slice(nb).join(' / ')
+    check('a Cancel that can\'t get the lock says it couldn\'t cancel, not that it came late',
+      !!held && stateOf('stop-m') === 'waiting' && /^WARN: Switcher couldn't cancel continuing/m.test(messages.slice(nb).join('\n')) && !/came after its wait/.test(busy), busy)
+    retry('Try again')
+    await tick()
+    check('Cancel tapped while it waits cancels the wait (here by its Try again)', stateOf('stop-m') === 'cancelled', stateOf('stop-m'))
+  }
+
   chatPinsLib.set(TEST_ROOT, LSID, 'dana', 'Fix the tests')
   store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'room', order: [] })
   liveSession('idle')
@@ -1371,6 +1404,15 @@ async function main() {
     check('and anything but true or false is refused', remembered.get('claudeswitcher.compactView') === true && ext._test.pageState().prefs.compact === true)
     await ext._test.onPageMessage({ type: 'setting', key: 'compact', value: false })
     check('it can be turned off again', remembered.get('claudeswitcher.compactView') === false && ext._test.pageState().prefs.compact === false)
+    check('the login validity lines are on by default', prefs.validity === true && !remembered.has('claudeswitcher.validityStroke'), JSON.stringify(prefs))
+    await ext._test.onPageMessage({ type: 'setting', key: 'validity', value: false })
+    check('turning them off is kept for every window and reaches the page', remembered.get('claudeswitcher.validityStroke') === false &&
+      ext._test.pageState().prefs.validity === false)
+    await ext._test.onPageMessage({ type: 'setting', key: 'validity', value: 'no' })
+    await ext._test.onPageMessage({ type: 'setting', key: 'validity', value: 0 })
+    check('anything but true or false is refused', remembered.get('claudeswitcher.validityStroke') === false && ext._test.pageState().prefs.validity === false)
+    await ext._test.onPageMessage({ type: 'setting', key: 'validity', value: true })
+    check('and they come back on', remembered.get('claudeswitcher.validityStroke') === true && ext._test.pageState().prefs.validity === true)
     await ext._test.onPageMessage({ type: 'setting', key: 'statusUsage', value: false })
     ext._test.refreshAll()
     check('Usage figures off hides the usage meter', run14.usageBar && run14.usageBar.shown === false)
@@ -1878,6 +1920,42 @@ async function main() {
     before = messages.length
     await ext._test.loginChangeTick()
     check('looked at once only', messages.length === before)
+    store.setPin(TEST_ROOT, OTHER, 'dana')
+    await ext._test.syncPins()
+    await ext._test.loginChangeTick()
+    {
+      const m = loginsLib.readMeta(TEST_ROOT, 'dana')
+      m.signedInAt = Date.now() - 6 * 3600e3
+      fs.writeFileSync(loginsLib.metaFile(TEST_ROOT, 'dana'), JSON.stringify(m))
+    }
+    const rnMeta = loginsLib.readMeta(TEST_ROOT, 'dana')
+    const rnEnd = rnMeta.expiresAt + 37
+    const rnIdentity = JSON.stringify(readJson(LIVE_CFG).oauthAccount)
+    before = messages.length
+    nextKeychainSecond()
+    credstore.write(DANA_PIN, { claudeAiOauth: { accessToken: 'AT-DP1r', refreshToken: 'RT-DP1r', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: rnEnd } })
+    {
+      const cfg = readJson(LIVE_CFG)
+      cfg.oauthAccount = { ...cfg.oauthAccount, organizationName: 'Dana Merged Org', displayName: 'Dana' }
+      fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+    }
+    await ext._test.loginChangeTick()
+    await tick()
+    const rnAfter = loginsLib.readMeta(TEST_ROOT, 'dana') || {}
+    check('a pinned chat renewing its pinning login (end 37 ms later) is not a /login: nothing held, nothing asked',
+      !loginsLib.foreignOf(TEST_ROOT, 'dana') && !messages.slice(before).some((m) => /^(WARN|INFO):/.test(m)), messages.slice(before).join(' / '))
+    check('its meta follows the new end date quietly, signed-in time and the rest unchanged',
+      rnAfter.expiresAt === rnEnd && rnAfter.signedInAt === rnMeta.signedInAt && rnAfter.accountUuid === rnMeta.accountUuid && rnAfter.email === rnMeta.email,
+      JSON.stringify(rnAfter))
+    check('the wrapper\'s list keeps dana\'s login line, with the new end date',
+      wrapperList().split('\n').some((l) => { const f = l.split('\t'); return f[0] === 'login' && f[1] === 'dana' && f[2] === String(Math.floor(rnEnd)) }), wrapperList())
+    check('the fields the renewal merged into ~/.claude.json are put back to the active account\'s', JSON.stringify(readJson(LIVE_CFG).oauthAccount) === rnIdentity,
+      JSON.stringify(readJson(LIVE_CFG).oauthAccount))
+    before = messages.length
+    await ext._test.loginChangeTick()
+    check('and nothing more the next time', messages.length === before && credstore.read(DANA_PIN).claudeAiOauth.refreshToken === 'RT-DP1r')
+    store.setPin(TEST_ROOT, OTHER, null)
+    await ext._test.syncPins()
     q.warn.push('Add it as its own account', { value: 'Done', text: 'Zed' })
     chatLogin(DANA_PIN, 'zed@example.com', 'uuid-z', 'RT-ZP', 30.5)
     await ext._test.loginChangeTick()
@@ -1921,10 +1999,24 @@ async function main() {
     before = messages.length
     await ext._test.loginChangeTick()
     check('its chat renewing it is not a new /login', messages.length === before && !danaLine())
+    const heldEnd = loginsLib.foreignOf(TEST_ROOT, 'dana').expiresAt
+    nextKeychainSecond()
+    credstore.write(DANA_PIN, { claudeAiOauth: { accessToken: 'AT-y', refreshToken: 'RT-ZP2c', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: heldEnd + 25 } })
+    {
+      const cfg = readJson(LIVE_CFG)
+      cfg.oauthAccount = { ...cfg.oauthAccount }
+      fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+    }
+    before = messages.length
+    await ext._test.loginChangeTick()
+    await tick()
+    check('its chat renewing it with an end date a few ms later: still held, no new question, its end date followed',
+      messages.slice(before).filter((m) => /^(WARN|INFO):/.test(m)).length === 0 && !danaLine() && (loginsLib.foreignOf(TEST_ROOT, 'dana') || {}).expiresAt === heldEnd + 25,
+      messages.slice(before).join(' / '))
     setBusy(M1CHAT, false)
     await ext._test.fastTick()
     check('the reply finished: the chat reopens (on the active account)', executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === M1CHAT))
-    check('while its old process runs, the login stays', credstore.read(DANA_PIN) && credstore.read(DANA_PIN).claudeAiOauth.refreshToken === 'RT-ZP2b')
+    check('while its old process runs, the login stays', credstore.read(DANA_PIN) && credstore.read(DANA_PIN).claudeAiOauth.refreshToken === 'RT-ZP2c')
     fs.rmSync(path.join(INUSE, process.pid + '.json'), { force: true })
     await ext._test.fastTick()
     await tick()
@@ -1971,6 +2063,31 @@ async function main() {
     check('answered after a reload: "Discard it" deletes it (no chat runs on it now)',
       !loginsLib.hasLogin(TEST_ROOT, 'dana') && !loginsLib.readMeta(TEST_ROOT, 'dana') && !ext._test.takeoutsPending().includes('dana'), messages.slice(before).join(' / '))
     q.info.length = 0
+
+    const lfEnd = givePinning('dana', 'dana@example.com', 'uuid-d', 'RT-LF', 12.5)
+    {
+      const lm = loginsLib.readMeta(TEST_ROOT, 'dana')
+      lm.foreign = { expiresAt: lfEnd, oauthAccount: { emailAddress: activeWho.email, accountUuid: activeWho.accountUuid }, since: Date.now() }
+      lm.expiresAt = null
+      fs.writeFileSync(loginsLib.metaFile(TEST_ROOT, 'dana'), JSON.stringify(lm))
+    }
+    await ext._test.loginChangeTick()
+    before = messages.length
+    q.warn.push('Keep it as dana\'s pinning login')
+    q.info.push('OK')
+    await ext._test.startupLogins()
+    await tick()
+    await tick()
+    const lfAsk = messages.slice(before).filter((m) => /^WARN: /.test(m))
+    check('a held login left over from 1.4.0/1.4.1 that reads as the active account: asked to keep it as dana\'s, not to give it to the active account',
+      lfAsk.length === 1 && /Keep it as dana's pinning login\?/.test(lfAsk[0]) && !/use it as|Add .* as an account of its own/.test(lfAsk[0]), lfAsk.join(' / '))
+    const lfMeta = loginsLib.readMeta(TEST_ROOT, 'dana') || {}
+    check('"Keep it" makes it dana\'s pinning login again, with dana\'s own identity',
+      !loginsLib.foreignOf(TEST_ROOT, 'dana') && lfMeta.expiresAt === lfEnd && lfMeta.accountUuid === 'uuid-d' && lfMeta.email === 'dana@example.com' &&
+      credstore.read(DANA_PIN).claudeAiOauth.refreshToken === 'RT-LF', JSON.stringify(lfMeta))
+    check('and the wrapper\'s list has dana\'s login line again', danaLine(), wrapperList())
+    q.info.length = 0
+    q.warn.length = 0
 
     const F3CHAT = '7d9e0a11-3333-4444-8555-a66677778888'
     const f3Title = 'Write the release notes'
@@ -2049,7 +2166,235 @@ async function main() {
       Math.abs(daysOf(loginsLib.readMeta(TEST_ROOT, 'dana').expiresAt) - 40.5) < 0.1)
     check('and the notice says nothing about a previous login', messages.slice(before).some((m) => /^INFO: Claude Code signed in as dana\. Switcher kept that fresh login/.test(m)) &&
       !messages.slice(before).some((m) => /previous login now keeps/.test(m)), messages.slice(before).join(' / '))
+    {
+      const liveNow = credstore.read(null).claudeAiOauth
+      const savedBefore = profiles.readMeta(TEST_ROOT, 'dana').loginExpiresAt
+      before = messages.length
+      nextKeychainSecond()
+      credstore.write(null, { claudeAiOauth: { ...liveNow, accessToken: 'AT-DL2r', refreshToken: 'RT-DL2r', refreshTokenExpiresAt: liveNow.refreshTokenExpiresAt + 37 } })
+      await ext._test.loginChangeTick()
+      check('Claude Code renewing the main login (end date 37 ms later) is not a /login: no notice, nothing saved over',
+        !messages.slice(before).some((m) => /^(INFO|WARN):/.test(m)) && profiles.readMeta(TEST_ROOT, 'dana').loginExpiresAt === savedBefore, messages.slice(before).join(' / '))
+    }
     store.setPin(TEST_ROOT, OTHER, null)
+
+    console.log('\n-- 1.4.2: two accounts signed in back to back, and changes while a pinned renewal waits --')
+    {
+      const breeDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cs-bree-'))
+      writeSignin(breeDir, { email: 'bree@example.com', uuid: 'uuid-b', rt: 'RT-B', days: 30 })
+      profiles.importFromDir(TEST_ROOT, 'bree', breeDir)
+      const danaEnd = profiles.readMeta(TEST_ROOT, 'dana').loginExpiresAt
+      profiles.updateCredentials(TEST_ROOT, 'bree', { claudeAiOauth: { accessToken: 'AT-B', refreshToken: 'RT-B', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: danaEnd + 40e3 } })
+      await ext._test.loginChangeTick()
+      const liveEnd = credstore.read(null).claudeAiOauth.refreshTokenExpiresAt
+      check('(set up: dana is active, its live end drifted, bree\'s saved end 40 s after dana\'s)', profiles.activeProfile(TEST_ROOT) === 'dana' &&
+        liveEnd !== danaEnd && loginsLib.sameLoginEnd(liveEnd, danaEnd) && loginsLib.sameLoginEnd(liveEnd, profiles.readMeta(TEST_ROOT, 'bree').loginExpiresAt))
+      const liveUuid = () => (readJson(LIVE_CFG).oauthAccount || {}).accountUuid
+      const WORK_PIN = loginsLib.dirFor(TEST_ROOT, 'work')
+      const workEnd = givePinning('work', 'work@example.com', 'uuid-w', 'RT-WP', 20.5)
+      await ext._test.loginChangeTick()
+      before = messages.length
+      nextKeychainSecond()
+      credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-WPr', refreshToken: 'RT-WPr', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: workEnd + 25 } })
+      {
+        const cfg = readJson(LIVE_CFG)
+        cfg.oauthAccount = { ...cfg.oauthAccount, displayName: 'Work' }
+        fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+      }
+      await ext._test.loginChangeTick()
+      await tick()
+      check('a pinned renewal with two accounts\' ends within 2 minutes: ~/.claude.json is put back to dana (the active account), not bree',
+        liveUuid() === 'uuid-d' && !readJson(LIVE_CFG).oauthAccount.displayName && profiles.activeProfile(TEST_ROOT) === 'dana' &&
+        loginsLib.readMeta(TEST_ROOT, 'work').expiresAt === workEnd + 25, JSON.stringify(readJson(LIVE_CFG).oauthAccount) + ' / ' + messages.slice(before).join(' / '))
+      await ext._test.onPageMessage({ type: 'switch', name: 'work' })
+      check('a switch away then saves the live login under dana, not bree',
+        profiles.readPayload(TEST_ROOT, 'dana').credentials.claudeAiOauth.refreshToken === 'RT-DL2r' &&
+        profiles.readPayload(TEST_ROOT, 'bree').credentials.claudeAiOauth.refreshToken === 'RT-B',
+        profiles.readPayload(TEST_ROOT, 'dana').credentials.claudeAiOauth.refreshToken + ' / ' + profiles.readPayload(TEST_ROOT, 'bree').credentials.claudeAiOauth.refreshToken)
+      await ext._test.onPageMessage({ type: 'switch', name: 'dana' })
+      await ext._test.loginChangeTick()
+
+      ext._test.setIdentityDelayMs(5000)
+      const renewWork = async (rt, plus) => {
+        const end = loginsLib.readMeta(TEST_ROOT, 'work').expiresAt
+        nextKeychainSecond()
+        credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-' + rt, refreshToken: rt, expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: end + plus } })
+        const t = ext._test.loginChangeTick()
+        for (let i = 0; i < 200 && loginsLib.readMeta(TEST_ROOT, 'work').expiresAt !== end + plus; i++) await new Promise((r) => setTimeout(r, 10))
+        return { t, end: end + plus }
+      }
+      before = messages.length
+      const r1 = await renewWork('RT-WPr2', 11)
+      chatLogin(null, 'bree@example.com', 'uuid-b', 'RT-BL', 60.5)
+      await r1.t
+      check('a /login as another account elsewhere while a pinned renewal waits is not undone', loginsLib.readMeta(TEST_ROOT, 'work').expiresAt === r1.end &&
+        liveUuid() === 'uuid-b', JSON.stringify(readJson(LIVE_CFG).oauthAccount) + ' / ' + messages.slice(before).join(' / '))
+      await ext._test.loginChangeTick()
+      check('and its login is saved as bree\'s, not dana\'s', profiles.readPayload(TEST_ROOT, 'bree').credentials.claudeAiOauth.refreshToken === 'RT-BL' &&
+        profiles.readPayload(TEST_ROOT, 'dana').credentials.claudeAiOauth.refreshToken === 'RT-DL2r')
+      await ext._test.onPageMessage({ type: 'switch', name: 'dana' })
+      await ext._test.loginChangeTick()
+      {
+        const p = profiles.readPayload(TEST_ROOT, 'work')
+        profiles.updateCredentials(TEST_ROOT, 'work', { claudeAiOauth: { ...p.credentials.claudeAiOauth, refreshTokenExpiresAt: Date.now() + 9.5 * DAY } })
+      }
+      before = messages.length
+      const r2 = await renewWork('RT-WPr3', 13)
+      {
+        const p = profiles.readPayload(TEST_ROOT, 'work')
+        credstore.write(null, p.credentials)
+        const cfg = readJson(LIVE_CFG)
+        Object.assign(cfg, p.identity)
+        fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+      }
+      await r2.t
+      check('a switch from another window while a pinned renewal waits is not undone', loginsLib.readMeta(TEST_ROOT, 'work').expiresAt === r2.end &&
+        liveUuid() === 'uuid-w' && profiles.activeProfile(TEST_ROOT) === 'work', JSON.stringify(readJson(LIVE_CFG).oauthAccount) + ' / ' + messages.slice(before).join(' / '))
+      await ext._test.loginChangeTick()
+      await ext._test.onPageMessage({ type: 'switch', name: 'dana' })
+      await ext._test.loginChangeTick()
+      {
+        const danaRt = profiles.readPayload(TEST_ROOT, 'dana').credentials.claudeAiOauth.refreshToken
+        before = messages.length
+        const r3 = await renewWork('RT-WPr4', 17)
+        chatLogin(null, 'work@example.com', 'uuid-w', 'RT-WL1', 40.5)
+        await r3.t
+        check('a /login as the pinned account elsewhere while its pinned renewal waits is not undone', loginsLib.readMeta(TEST_ROOT, 'work').expiresAt === r3.end &&
+          liveUuid() === 'uuid-w', JSON.stringify(readJson(LIVE_CFG).oauthAccount) + ' / ' + messages.slice(before).join(' / '))
+        await ext._test.loginChangeTick()
+        check('and its login is saved as work\'s, not dana\'s, and work shows as the account in use',
+          profiles.readPayload(TEST_ROOT, 'work').credentials.claudeAiOauth.refreshToken === 'RT-WL1' &&
+          profiles.readPayload(TEST_ROOT, 'dana').credentials.claudeAiOauth.refreshToken === danaRt &&
+          profiles.activeProfile(TEST_ROOT) === 'work' && liveUuid() === 'uuid-w' &&
+          !messages.slice(before).some((m) => /signed in as Dana/i.test(m)), messages.slice(before).join(' / '))
+        await ext._test.onPageMessage({ type: 'switch', name: 'dana' })
+        await ext._test.loginChangeTick()
+      }
+      ext._test.setIdentityDelayMs(10)
+
+      {
+        givePinning('work', 'work@example.com', 'uuid-w', 'RT-WPold', 3.5)
+        const pm = profiles.readMeta(TEST_ROOT, 'work')
+        pm.signedInAt = Date.now() - 5 * DAY
+        profiles.writeMeta(TEST_ROOT, 'work', pm)
+        const movedSignedIn = pm.signedInAt
+        await ext._test.loginChangeTick()
+        before = messages.length
+        chatLogin(null, 'work@example.com', 'uuid-w', 'RT-WL2', 50.5)
+        await ext._test.loginChangeTick()
+        const mm = loginsLib.readMeta(TEST_ROOT, 'work') || {}
+        check('a login moved into pinning by a /login keeps its own sign-in time',
+          credstore.read(WORK_PIN).claudeAiOauth.refreshToken === 'RT-WL1' && mm.signedInAt === movedSignedIn &&
+          Math.abs(profiles.readMeta(TEST_ROOT, 'work').signedInAt - Date.now()) < 60e3, JSON.stringify(mm) + ' / ' + messages.slice(before).join(' / '))
+        await ext._test.onPageMessage({ type: 'switch', name: 'dana' })
+        await ext._test.loginChangeTick()
+        before = messages.length
+        const end = loginsLib.readMeta(TEST_ROOT, 'work').expiresAt
+        nextKeychainSecond()
+        credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-WL1r', refreshToken: 'RT-WL1r', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: end + 30 } })
+        {
+          const cfg = readJson(LIVE_CFG)
+          cfg.oauthAccount = { ...cfg.oauthAccount, displayName: 'Work' }
+          fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+        }
+        await ext._test.loginChangeTick()
+        await tick()
+        const after = loginsLib.readMeta(TEST_ROOT, 'work') || {}
+        check('and its renewal minutes after the move is followed quietly, not held as the active account\'s',
+          !after.foreign && after.expiresAt === end + 30 && liveUuid() === 'uuid-d' && !messages.slice(before).some((m) => /^WARN:/.test(m)),
+          JSON.stringify(after) + ' / ' + messages.slice(before).join(' / '))
+      }
+
+      const freshEnd = givePinning('work', 'work@example.com', 'uuid-w', 'RT-WP3', 25.5)
+      {
+        const m = loginsLib.readMeta(TEST_ROOT, 'work')
+        m.signedInAt = Date.now() - 30e3
+        fs.writeFileSync(loginsLib.metaFile(TEST_ROOT, 'work'), JSON.stringify(m))
+      }
+      await ext._test.loginChangeTick()
+      before = messages.length
+      q.warn.push(undefined)
+      nextKeychainSecond()
+      credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-BP', refreshToken: 'RT-BP', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: freshEnd + 50e3 } })
+      {
+        const cfg = readJson(LIVE_CFG)
+        cfg.oauthAccount = { emailAddress: 'bree@example.com', accountUuid: 'uuid-b', organizationName: 'Acme' }
+        fs.writeFileSync(LIVE_CFG, JSON.stringify(cfg))
+      }
+      await ext._test.loginChangeTick()
+      await tick()
+      check('a /login as another account within 2 minutes of the pinning sign-in is not taken for a renewal: held, and asked',
+        ((loginsLib.foreignOf(TEST_ROOT, 'work') || {}).oauthAccount || {}).accountUuid === 'uuid-b' &&
+        messages.slice(before).some((m) => /^WARN: A chat pinned to .* signed in as bree@example\.com/.test(m)), messages.slice(before).join(' / '))
+      check('and the active account is put back in ~/.claude.json', liveUuid() === 'uuid-d')
+      fs.rmSync(WORK_PIN, { recursive: true, force: true })
+      fs.rmSync(loginsLib.metaFile(TEST_ROOT, 'work'), { force: true })
+      await ext._test.loginChangeTick()
+
+      const workLabel = (ext._test.pageState().accounts.find((a) => a.name === 'work') || {}).label
+      const oldEnd = givePinning('work', 'work@example.com', 'uuid-w', 'RT-WL', 12.5)
+      const oldSignedIn = Date.now() - 17.5 * DAY
+      const writeHold = (m) => fs.writeFileSync(loginsLib.metaFile(TEST_ROOT, 'work'), JSON.stringify(m))
+      writeHold({ ...loginsLib.readMeta(TEST_ROOT, 'work'), signedInAt: oldSignedIn, expiresAt: null,
+        foreign: { expiresAt: oldEnd, oauthAccount: { emailAddress: 'bree@example.com', accountUuid: 'uuid-b' }, since: Date.now() - 2 * DAY } })
+      await ext._test.loginChangeTick()
+      before = messages.length
+      q.warn.push('Keep it as ' + workLabel + '\'s pinning login')
+      q.info.push('OK')
+      await ext._test.startupLogins()
+      await tick()
+      await tick()
+      const sw = messages.slice(before).filter((m) => /^WARN: /.test(m))
+      check('a leftover hold after a switch: still asked to keep it as work\'s, not to give it to bree',
+        sw.length === 1 && /Keep it as .*'s pinning login\?/.test(sw[0]) && !/use it as/.test(sw[0]), sw.join(' / '))
+      const kept = loginsLib.readMeta(TEST_ROOT, 'work') || {}
+      check('"Keep it" keeps the login\'s own sign-in time', !kept.foreign && kept.expiresAt === oldEnd && kept.accountUuid === 'uuid-w' && kept.signedInAt === oldSignedIn,
+        JSON.stringify(kept))
+      q.info.length = 0
+      q.warn.length = 0
+      nextKeychainSecond()
+      credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-BG', refreshToken: 'RT-BG', expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: Date.now() + 30 * DAY } })
+      writeHold({ ...loginsLib.readMeta(TEST_ROOT, 'work'), signedInAt: Date.now() - 10 * DAY, expiresAt: null,
+        foreign: { expiresAt: Date.now() + 30 * DAY, oauthAccount: { emailAddress: 'bree@example.com', accountUuid: 'uuid-b' }, since: Date.now() } })
+      await ext._test.loginChangeTick()
+      before = messages.length
+      q.warn.push(undefined)
+      await ext._test.startupLogins()
+      await tick()
+      const gw = messages.slice(before).filter((m) => /^WARN: /.test(m))
+      check('a leftover hold of a real sign-in as bree is still offered to bree', gw.length === 1 && /use it as .*'s pinning login\?/.test(gw[0]), gw.join(' / '))
+      q.warn.length = 0
+      const leftover = async (end, since, signedInAt, who) => {
+        nextKeychainSecond()
+        credstore.write(WORK_PIN, { claudeAiOauth: { accessToken: 'AT-LO', refreshToken: 'RT-LO' + since, expiresAt: Date.now() + 3600e3, refreshTokenExpiresAt: end } })
+        writeHold({ ...loginsLib.readMeta(TEST_ROOT, 'work'), signedInAt, expiresAt: null, foreign: { expiresAt: end, oauthAccount: who, since } })
+        await ext._test.loginChangeTick()
+        before = messages.length
+        q.warn.push(undefined)
+        await ext._test.startupLogins()
+        await tick()
+        q.warn.length = 0
+        return messages.slice(before).filter((m) => /^WARN: /.test(m))
+      }
+      const BREE = { emailAddress: 'bree@example.com', accountUuid: 'uuid-b' }
+      const DANA = { emailAddress: 'dana@example.com', accountUuid: 'uuid-d' }
+      const KEEP = /Keep it as .*'s pinning login\?/, USE = /use it as .*'s pinning login\?/
+      const s8 = Date.now() - 10 * DAY
+      let lw = await leftover(s8 + 30 * DAY, s8 + 8 * 3600e3, s8, BREE)
+      check('a leftover hold 8 hours after the sign-in, after a switch: asked to keep it as work\'s', lw.length === 1 && KEEP.test(lw[0]) && !USE.test(lw[0]), lw.join(' / '))
+      lw = await leftover(s8 + 30 * DAY + 5, s8 + 8 * 3600e3 + 5, s8, DANA)
+      check('a leftover hold 8 hours after the sign-in, no switch: asked to keep it as work\'s', lw.length === 1 && KEEP.test(lw[0]) && !USE.test(lw[0]), lw.join(' / '))
+      lw = await leftover(Date.now() + 12.5 * DAY, Date.now() - 2 * DAY, Date.now() - 5 * DAY, DANA)
+      check('a leftover hold of a login moved into pinning (sign-in time = move time), no switch: asked to keep it as work\'s',
+        lw.length === 1 && KEEP.test(lw[0]) && !USE.test(lw[0]), lw.join(' / '))
+      lw = await leftover(Date.now() + 30 * DAY, Date.now() - 1000, Date.now() - 10 * DAY, DANA)
+      check('a leftover hold of a real sign-in as the active account still asks the old question', lw.length === 1 && USE.test(lw[0]), lw.join(' / '))
+      fs.rmSync(WORK_PIN, { recursive: true, force: true })
+      fs.rmSync(loginsLib.metaFile(TEST_ROOT, 'work'), { force: true })
+      profiles.remove(TEST_ROOT, 'bree')
+      fs.rmSync(breeDir, { recursive: true, force: true })
+      await ext._test.loginChangeTick()
+    }
 
     console.log('\n-- 1.4: Forget removes the pinning login and its settings --')
     await ext._test.onPageMessage({ type: 'remote', name: 'finn', on: false })
