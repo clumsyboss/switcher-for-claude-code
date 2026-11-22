@@ -1316,6 +1316,29 @@
   function banners() {
     const s = state
     const out = []
+    const u = s.update
+    if (u && typeof u.version === 'string' && u.restart) {
+      out.push(h('div', { class: 'muted upd-restart', text: 'Restart extensions to finish updating to ' + u.version + '.' }))
+    } else if (u && typeof u.version === 'string') {
+      out.push(h('div', { class: 'banner update' }, icon('info'),
+        h('div', { class: 'grow' }, h('strong', { text: 'Switcher ' + u.version + ' is available. You have ' + u.current + '.' }),
+          u.notes ? h('div', { class: 'muted upd-notes', text: String(u.notes), title: String(u.notes) }) : null),
+        h('div', { class: 'banner-actions' },
+          h('button', { class: 'btn primary sm', 'data-fk': 'banner:update', onclick: () => send('updateChoice', { choice: 'update' }) }, 'Update'),
+          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:notes', onclick: () => send('updateChoice', { choice: 'notes' }) }, 'What’s new'),
+          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:later', onclick: () => send('updateChoice', { choice: 'later' }) }, 'Later'))))
+    }
+    const w = s.whatsNew
+    if (w && typeof w.version === 'string' && !s.welcome) {
+      const items = Array.isArray(w.items) ? w.items.filter((t) => typeof t === 'string') : []
+      out.push(h('div', { class: 'banner upd-done' }, icon('sparkle'),
+        h('div', { class: 'grow' }, h('strong', { text: 'Updated to ' + w.version }),
+          items.length ? h('ul', { class: 'muted wn-list' }, items.map((t) => h('li', { text: t, title: t }))) : null),
+        h('div', { class: 'banner-actions' },
+          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:changes', onclick: () => send('whatsNewChoice', { choice: 'all' }) }, 'See all changes'),
+          h('button', { class: 'icon-btn', 'data-fk': 'banner:wnclose', title: 'Close', 'aria-label': 'Close this notice',
+            onclick: () => send('whatsNewChoice', { choice: 'close' }) }, icon('x', 'sm')))))
+    }
     if (s.registryError) {
       out.push(h('div', { class: 'banner warn' }, icon('alert'),
         h('div', { class: 'grow' }, h('strong', { text: 'The settings file has an error' }),

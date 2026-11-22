@@ -99,6 +99,14 @@ body { padding: clamp(16px, 4vw, 36px); min-height: 100vh; }
 .banner .muted { color: var(--muted-foreground); }
 .banner.warn { background: color-mix(in srgb, var(--warn) 13%, var(--card)); }
 .banner.warn > .i { color: var(--warn); }
+.banner .banner-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.banner .banner-actions .btn { flex: none; }
+.banner .wn-list { margin: 2px 0 0; padding: 0; list-style: none; }
+.banner .wn-list li { position: relative; padding-left: 12px; margin: 2px 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+.banner .upd-notes { margin-top: 2px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+.banner .wn-list li::before { content: ''; position: absolute; left: 2px; top: .62em; width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .7; }
+.banner.upd-done > .i, .banner.update > .i { align-self: flex-start; margin-top: 1px; }
+.upd-restart { color: var(--muted-foreground); font-size: 12px; padding: 2px 0; }
 
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px;
   padding: 0 12px; border-radius: var(--radius-sm); border: 1px solid var(--hc-border); font: inherit;

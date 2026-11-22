@@ -39,10 +39,12 @@ function mockWebview() {
 }
 
 const clipboard = { text: null }
+const externalOpened = []
 const FAKE_APPROOT = path.join(TEST_ROOT + '-vscode', 'resources', 'app')
 
 const vscode = {
-  env: { appRoot: FAKE_APPROOT, clipboard: { writeText: async (t) => { clipboard.text = t } } },
+  env: { appRoot: FAKE_APPROOT, clipboard: { writeText: async (t) => { clipboard.text = t } },
+    openExternal: async (u) => { externalOpened.push(String(u)); return true } },
   StatusBarAlignment: { Left: 1, Right: 2 },
   ProgressLocation: { Notification: 15 },
   ConfigurationTarget: { Global: 1 },
@@ -50,7 +52,7 @@ const vscode = {
   ThemeColor: class { constructor(id) { this.id = id } },
   ThemeIcon: class { constructor(id) { this.id = id } },
   MarkdownString: class { constructor(v) { this.value = v } },
-  Uri: { file: (p) => ({ fsPath: p, toString() { return 'file://' + p } }) },
+  Uri: { file: (p) => ({ fsPath: p, toString() { return 'file://' + p } }), parse: (s) => ({ toString() { return String(s) } }) },
   window: {
     createOutputChannel: () => ({
       appendLine: (l) => messages.push('OUT: ' + l), show() {}, dispose() {},
@@ -145,6 +147,8 @@ let authMock = { ok: false, error: 'mocked' }
 claudeLib.authStatus = () => authMock
 claudeLib.resolveBin = () => 'C:\\fake\\claude.exe'
 ext._test.setLoginPollMs(20)
+const updateAsks = []
+ext._test.setUpdateRequest(async (o) => { updateAsks.push(o); return { status: 0, error: 'no network in tests' } })
 const queueAsker = async (spec, list) => spec.kind === 'pick'
   ? vscode.window.showQuickPick(list, { placeHolder: spec.placeholder })
   : spec.kind === 'confirm' && spec.buttons
@@ -268,7 +272,7 @@ async function main() {
   {
     const ed = require('../lib/editors.js').read(TEST_ROOT)
     check('activation records this editor\'s User folder and the switcher\'s folder, for the uninstall script',
-      ed.length === 1 && ed[0].user === path.join(TEST_ROOT, 'SomeEditor', 'User') && ed[0].ext === path.join(__dirname, '..'), JSON.stringify(ed))
+      ed.length === 1 && ed[0].user === path.join(TEST_ROOT, 'SomeEditor', 'User') && require('../lib/editors.js').same(ed[0].ext, path.join(__dirname, '..')), JSON.stringify(ed))
   }
   check('a machine-wide CLAUDE_CONFIG_DIR is only cleared after asking (M7)',
     messages.some((m) => m.startsWith('WARN: Claude Code is set to use CLAUDE_CONFIG_DIR=')))
@@ -1542,9 +1546,99 @@ async function main() {
     console.log('\n-- 1.4: the welcome and what\'s new --')
     const w = ext._test.pageState().welcome
     check('someone updating (accounts saved, nothing seen yet) gets what\'s new for 1.4.0', w && w.kind === 'update' && w.version === '1.4.0' && w.items.length > 0)
+    fs.rmSync(path.join(TEST_ROOT, 'updates.json'), { force: true })
+    check('while the welcome dialog shows what\'s new, the "Updated to" notice waits', !!ext._test.pageState().whatsNew)
     await ext._test.onPageMessage({ type: 'welcomeDone', kind: 'update' })
     await tick()
     check('once seen, it isn\'t shown again (in any window)', remembered.get('claudeswitcher.seenVersion') === '1.4.0' && ext._test.pageState().welcome === null)
+    check('and "Updated to" doesn\'t follow it: one what\'s new, not two', ext._test.pageState().whatsNew === null)
+
+    console.log('\n-- 1.5.1: an update is available --')
+    {
+      const updFile = path.join(TEST_ROOT, 'updates.json')
+      fs.rmSync(updFile, { force: true })
+      ext._test.clearUpdateMemory()
+      const asks = []
+      ext._test.setUpdateRequest(async (o) => {
+        asks.push(o)
+        return { status: 200, headers: { etag: 'W/"h1"' }, body: JSON.stringify({ tag_name: 'v1.4.9', published_at: new Date(Date.now() - 2 * DAY).toISOString(),
+          html_url: 'https://evil.example/page', body: '<img src=x onerror=alert(1)><b>Fixes</b> and **more**, see [this](https://evil.example/x).\n\n## Rest' }) }
+      })
+      await ext._test.updateTick()
+      check('the check asks once, through the fake, and keeps the answer in the Switcher\'s folder', asks.length === 1 && fs.existsSync(updFile))
+      const u = ext._test.pageState().update
+      check('the page gets the notice, with the notes as plain text', u && u.version === '1.4.9' && u.current === '1.4.0' &&
+        u.notes === 'Fixes and more, see this.' && u.url === 'https://github.com/clumsyboss/switcher-for-claude-code/releases/tag/v1.4.9', JSON.stringify(u))
+      check('the status bar item gets a small mark', /\$\(arrow-circle-up\)$/.test(run14.accountBar.text || ''), run14.accountBar.text)
+      check('and a line in its hover', String(run14.accountBar.tooltip || '').includes('Switcher 1.4.9 is available (you have 1.4.0)'))
+      await ext._test.updateTick()
+      check('a second look the same day asks nothing', asks.length === 1)
+
+      await ext._test.onPageMessage({ type: 'updateChoice', choice: 'notes' })
+      check('What\'s new opens the release page built from the version', externalOpened.slice(-1)[0] === u.url)
+      const ranAt = executed.length
+      const msgAt = messages.length
+      await ext._test.onPageMessage({ type: 'updateChoice', choice: 'update' })
+      const ran = executed.slice(ranAt)
+      check('Update asks the editor to install from its store, by the extension\'s id', ran[0] && ran[0].id === 'workbench.extensions.installExtension' &&
+        ran[0].args[0] === 'clumsyboss.account-switcher-claude-code' && ran[0].args.length === 1, JSON.stringify(ran))
+      check('nothing is reloaded or restarted by the Switcher', !ran.some((r) => /reload|restart/i.test(r.id)))
+      check('and the user is told what happened', messages.slice(msgAt).some((m) => /Switcher 1\.4\.9 is installed/.test(m)), messages.slice(msgAt).join(' | '))
+
+      await ext._test.onPageMessage({ type: 'updateChoice', choice: 'later' })
+      check('Later: no notice and no mark', ext._test.pageState().update === null && !/arrow-circle-up/.test(run14.accountBar.text || ''))
+      const savedLater = JSON.parse(fs.readFileSync(updFile, 'utf8')).later
+      check('kept for every window, in the Switcher\'s folder, for 7 days', savedLater && savedLater.version === '1.4.9' &&
+        Math.abs(savedLater.until - (Date.now() + 7 * DAY)) < 60000, JSON.stringify(savedLater))
+
+      fs.writeFileSync(updFile, JSON.stringify({ checkedAt: Date.now(), later: savedLater, latest: { version: '1.4.10', publishedAt: Date.now() - 2 * DAY, notes: '' } }))
+      ext._test.refreshUpdateNotice()
+      check('a newer version shows again (1.4.10 over 1.4.9)', ext._test.pageState().update && ext._test.pageState().update.version === '1.4.10')
+
+      const listFile = path.join(TEST_ROOT, 'ext-list', 'extensions.json')
+      fs.mkdirSync(path.dirname(listFile), { recursive: true })
+      const listed = (v, pinned) => fs.writeFileSync(listFile, JSON.stringify([{ identifier: { id: 'clumsyboss.account-switcher-claude-code' }, version: v,
+        metadata: pinned ? { source: 'vsix', pinned: true } : { source: 'gallery' } }]))
+      ext._test.setExtensionsList(listFile)
+      listed('1.4.10', false)
+      ext._test.refreshUpdateNotice()
+      const rs = ext._test.pageState().update
+      check('the editor already has 1.4.10 on disk: only the quiet restart line, no mark, no hover line', rs && rs.restart === true &&
+        rs.version === '1.4.10' && !/arrow-circle-up/.test(run14.accountBar.text || '') &&
+        !String(run14.accountBar.tooltip || '').includes('is available'), JSON.stringify(rs))
+      const ranRs = executed.length
+      await ext._test.onPageMessage({ type: 'updateChoice', choice: 'update' })
+      check('and nothing to install from it', executed.length === ranRs)
+      listed('1.4.0', true)
+      fs.writeFileSync(updFile, JSON.stringify({ checkedAt: Date.now(), latest: { version: '1.4.11', publishedAt: Date.now() - 3600e3, notes: '' } }))
+      ext._test.refreshUpdateNotice()
+      check('a pinned copy (installed from a file) is told within the first day', ext._test.pageState().update &&
+        ext._test.pageState().update.version === '1.4.11' && !ext._test.pageState().update.restart)
+      listed('1.4.0', false)
+      ext._test.refreshUpdateNotice()
+      check('one the editor updates by itself waits a day', ext._test.pageState().update === null)
+      ext._test.setExtensionsList(null)
+      settings.claudeswitcher.checkForUpdates = false
+      fs.rmSync(updFile, { force: true })
+      const before = asks.length
+      await ext._test.updateTick()
+      check('the setting off: no request, no notice, no mark', asks.length === before && ext._test.pageState().update === null &&
+        !/arrow-circle-up/.test(run14.accountBar.text || ''))
+      delete settings.claudeswitcher.checkForUpdates
+      ext._test.setUpdateRequest(async (o) => { updateAsks.push(o); return { status: 0, error: 'no network in tests' } })
+
+      console.log('\n-- 1.5.1: what\'s new, once after an update --')
+      fs.rmSync(updFile, { force: true })
+      const wn = ext._test.pageState().whatsNew
+      check('an update shows "Updated to" with this version\'s headlines from the changelog', wn && wn.version === '1.4.0' &&
+        Array.isArray(wn.items) && wn.items.length >= 1 && wn.items.length <= 3, JSON.stringify(wn))
+      await ext._test.onPageMessage({ type: 'whatsNewChoice', choice: 'all' })
+      check('See all changes opens the bundled changelog', executed.slice(-1)[0].id === 'markdown.showPreview' &&
+        /CHANGELOG\.md$/.test(executed.slice(-1)[0].args[0].fsPath))
+      await ext._test.onPageMessage({ type: 'whatsNewChoice', choice: 'close' })
+      check('closed, it is gone for that version, for the whole PC', ext._test.pageState().whatsNew === null &&
+        JSON.parse(fs.readFileSync(updFile, 'utf8')).seen === '1.4.0')
+    }
 
     console.log('\n-- 1.4: switching to another organization --')
     const card = (n) => ext._test.pageState().accounts.find((a) => a.name === n)

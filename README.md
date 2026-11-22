@@ -51,6 +51,36 @@ after limits, Keep alive and plan detection all came in the last few weeks. Make
 sure **Auto Update** is on (Extensions view → Switcher for Claude Code → ⚙ →
 **Auto Update**), so you get each one as soon as it's out.
 
+### Checking for updates
+
+A copy installed from a downloaded `.vsix` file usually does not update by
+itself, so the Switcher tells you when a newer version is out:
+
+- **What it asks.** Once a day for the whole PC (not per window or editor), it
+  asks GitHub for the latest release of this project's public repository. The
+  answer is kept in `~/.claude-switcher/updates.json`, so other windows and
+  editors read it instead of asking again.
+- **What it sends.** Nothing about you: no account, no email, no id, only the
+  ordinary request with the name `switcher-for-claude-code`. Like any website
+  you visit, GitHub sees your internet address and the time.
+- **What it shows.** When a newer version has been out for a day (or right away
+  if the editor won't update the Switcher by itself), a notice at the top of
+  the Accounts page with **Update**, **What's new** and **Later**, and a small
+  mark on the status bar's account item. **Later** keeps quiet about that
+  version for 7 days; a different version shows at once. **Update** asks the
+  editor to install the version from its own extension store, in place of the
+  copy you have (also one installed from a `.vsix` file); the editor then asks
+  to restart extensions. If the editor has already downloaded the new version
+  and only needs its extensions restarted, the page shows just one quiet line:
+  "Restart extensions to finish updating to X."
+- **Turning it off.** Switch off **Check for Updates** in Settings
+  (`claudeswitcher.checkForUpdates`). The setting belongs to each editor: off
+  in one editor stops that editor asking and showing, while another editor on
+  the same PC with it on still asks once a day.
+
+After an update, the Accounts page says once what's new in that version, with **See all
+changes** for the full changelog.
+
 ## About this project
 
 *Unofficial: a community project, not made by or affiliated with Anthropic.
@@ -690,6 +720,7 @@ passphrase separately from the file.
   bin/                              the wrapper that starts each chat Claude Code opens
   usage/                            the last live usage figures per account
   locks/                            short-lived locks, so windows never renew at once
+  updates.json                      the last update check (time, latest version, its notes), Later, and the last "what's new" shown
 ```
 
 `registry.json` is plain JSON and safe to edit by hand; the extension watches it

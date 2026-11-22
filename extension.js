@@ -34,6 +34,7 @@ const signinLib = require('./lib/signin')
 const healthLib = require('./lib/health')
 const requestsLib = require('./lib/requests')
 const cardsLib = require('./lib/cards')
+const updatesLib = require('./lib/updates')
 
 const DEFAULT_NAME = store.DEFAULT_NAME
 const VIEW_ID = 'claudeswitcher.accountsView'
@@ -167,6 +168,11 @@ function loginLine(expiresAt) {
     : 'Login: sign in again by ' + when + ' (' + (days === 0 ? 'today' : days === 1 ? '1 day left' : days + ' days left') + ').'
 }
 
+function updateMark() { return updateNotice && !updateNotice.restart ? ' $(arrow-circle-up)' : '' }
+function updateLine() {
+  return updateNotice && !updateNotice.restart ? '$(arrow-circle-up) Switcher ' + updateNotice.version + ' is available (you have ' + updateNotice.current + '). Open the Accounts page to update.' : null
+}
+
 function updateStatusBar() {
   if (!statusBar) return
 
@@ -177,7 +183,7 @@ function updateStatusBar() {
     statusBar.command = 'claudeswitcher.pinFolder'
     const pin = pinState.source === 'pin' && name ? pinningOf(name) : null
     const until = pin ? pin.expiresAt : loginExpiryOf(name, pinState.dir, true)
-    statusBar.text = '$(pin) ' + disp.label
+    statusBar.text = '$(pin) ' + disp.label + updateMark()
     statusBar.backgroundColor = undefined
     statusBar.tooltip = trustedTip([
       '**This window is pinned to ' + mdEscape(disp.label) + '**',
@@ -186,6 +192,7 @@ function updateStatusBar() {
       pinState.folder ? 'Folder: ' + mdEscape(pinState.folder) : null,
       'Chats in this folder run as ' + mdEscape(disp.label) + ', on its pinning login, so they never sign your other chats out. ' +
         'They keep your usual settings, skills and history. The global switcher doesn\'t change this folder.',
+      updateLine(),
       '', 'Click to change or remove this folder\'s pin.',
     ], [])
     statusBar.show()
@@ -199,7 +206,7 @@ function updateStatusBar() {
   const launched = windowPinnedDir()
   statusBar.command = 'claudeswitcher.globalSwitch'
   const until = loginExpiryOf(active, null, true)
-  statusBar.text = store.iconText((disp && disp.icon) || 'account') + ' ' + label
+  statusBar.text = store.iconText((disp && disp.icon) || 'account') + ' ' + label + updateMark()
   statusBar.backgroundColor = active ? undefined : new vscode.ThemeColor('statusBarItem.warningBackground')
   statusBar.tooltip = trustedTip([
     '**Claude account: ' + mdEscape(label) + '**',
@@ -212,6 +219,7 @@ function updateStatusBar() {
     active && store.getArtifacts(root(), active) === 'off' ? 'Artifacts: **off** for this account.' : null,
     launched ? '⚠ This window was launched with CLAUDE_CONFIG_DIR=' + mdEscape(launched) + ', so it does not follow the switcher.' : null,
     store.registryError(root()) ? '⚠ ' + mdEscape(store.registryError(root())) : null,
+    updateLine(),
     '', 'Click to switch accounts for every window that isn\'t pinned.',
   ], [])
   statusBar.show()
@@ -3723,6 +3731,8 @@ function pageState() {
     prefs: allPrefs(),
     welcome: welcomeState(),
     checklist: checklistState(),
+    update: updateNotice,
+    whatsNew: whatsNewState(),
   }
 }
 
@@ -3741,6 +3751,101 @@ function postState() {
   let state
   try { state = pageState() } catch (e) { log('page state: ' + (e && e.message)); return }
   for (const w of targets) w.postMessage({ type: 'state', state }).then(() => {}, () => {})
+}
+
+const UPDATE_TICK_MS = 60 * 60 * 1000
+const UPDATE_FIRST_MS = 30 * 1000
+const FALLBACK_ID = 'clumsyboss.account-switcher-claude-code'
+let updateNotice = null
+let updateRequest = null
+let updateBusy = false
+let whatsNewFirstInstall = false
+let changelogText = null
+const updateMemory = {}
+let extensionsListOverride = null
+
+function checkUpdatesOn() { return vscode.workspace.getConfiguration('claudeswitcher').get('checkForUpdates') !== false }
+function extensionId() { return (extContext && extContext.extension && extContext.extension.id) || FALLBACK_ID }
+
+function installInfoHere() {
+  try {
+    const gs = extContext && extContext.globalStorageUri && extContext.globalStorageUri.fsPath
+    const file = extensionsListOverride || updatesLib.extensionsListFile(extensionPath || __dirname, gs)
+    return updatesLib.installInfo(fs.readFileSync(file, 'utf8'), extensionId())
+  } catch { return { found: false, pinned: false, source: null, version: null } }
+}
+
+function refreshUpdateNotice() {
+  let n = null
+  try {
+    if (checkUpdatesOn()) {
+      const st = updatesLib.readState(root())
+      const opts = { enabled: true, wontUpdateItself: false, installed: null }
+      if (updatesLib.newerSaved(st, version)) {
+        const info = installInfoHere()
+        opts.wontUpdateItself = updatesLib.autoUpdateOff(vscode.workspace.getConfiguration('extensions').get('autoUpdate')) || info.pinned
+        opts.installed = info.found ? info.version : null
+      }
+      n = updatesLib.noticeFor(st, version, opts)
+    }
+  } catch (e) { log('update notice: ' + (e && e.message)) }
+  const changed = JSON.stringify(n) !== JSON.stringify(updateNotice)
+  updateNotice = n
+  if (changed) { updateStatusBar(); postState() }
+}
+
+async function updateTick() {
+  if (checkUpdatesOn()) {
+    try { await updatesLib.check(root(), true, { request: updateRequest || undefined, log, memory: updateMemory }) } catch (e) { log('update check: ' + (e && e.message)) }
+  }
+  refreshUpdateNotice()
+}
+
+async function updateChoice(choice) {
+  const n = updateNotice
+  if (!n || n.restart) return
+  if (choice === 'later') {
+    updatesLib.later(root(), n.version)
+    refreshUpdateNotice()
+  } else if (choice === 'notes') {
+    await vscode.env.openExternal(vscode.Uri.parse(updatesLib.releaseUrl(n.version)))
+  } else if (choice === 'update') {
+    if (updateBusy) return
+    updateBusy = true
+    try {
+      const r = await updatesLib.runUpdate({
+        executeCommand: (id, ...args) => vscode.commands.executeCommand(id, ...args),
+        openExternal: (url) => vscode.env.openExternal(vscode.Uri.parse(url)),
+        installedVersion: () => { const i = installInfoHere(); return i.found ? i.version : null },
+        id: extensionId(), target: n.version, current: version, log,
+      })
+      log('update: ' + r.done + (r.reason ? ' (' + r.reason + ')' : ''))
+      notify(r.done === 'installed' ? 'info' : 'warn', r.message)
+    } finally { updateBusy = false }
+  }
+}
+
+function changelog() {
+  if (changelogText === null) {
+    try { changelogText = fs.readFileSync(path.join(extensionPath || __dirname, 'CHANGELOG.md'), 'utf8') } catch { changelogText = '' }
+  }
+  return changelogText
+}
+
+function whatsNewState() {
+  if (!version) return null
+  try { return updatesLib.whatsNewFor(root(), version, { firstInstall: whatsNewFirstInstall, changelog: changelog() }) } catch { return null }
+}
+
+async function whatsNewChoice(choice) {
+  if (choice === 'close') {
+    if (version) updatesLib.seenWhatsNew(root(), version)
+  } else if (choice === 'all') {
+    const uri = vscode.Uri.file(path.join(extensionPath || __dirname, 'CHANGELOG.md'))
+    try { await vscode.commands.executeCommand('markdown.showPreview', uri) } catch {
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri))
+    }
+  }
 }
 
 const SEEN_KEY = 'claudeswitcher.seenVersion'
@@ -3946,7 +4051,10 @@ const PAGE_ACTIONS = {
     else postState()
   },
   learnMore: () => { vscode.env.openExternal(vscode.Uri.parse(PRESERVED_THINKING_URL)) },
+  updateChoice: (m) => updateChoice(m.choice),
+  whatsNewChoice: (m) => whatsNewChoice(m.choice),
   welcomeDone: () => {
+    if (version) { try { updatesLib.seenWhatsNew(root(), version) } catch {  } }
     if (extContext && extContext.globalState && version) extContext.globalState.update(SEEN_KEY, version).then(() => postState(), () => {})
   },
   setting: (m) => { setPref(m.key, m.value).then(() => postState(), () => {}) },
@@ -4237,6 +4345,8 @@ function activate(context) {
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('claudeswitcher.trackAllAccounts')) { refreshAll(); trackerTick() }
     if (e.affectsConfiguration('claudeswitcher')) { updateStatusBar(); updateUsageBar(); postState() }
+    if (e.affectsConfiguration('claudeswitcher.checkForUpdates')) updateTick().catch(() => {})
+    else if (e.affectsConfiguration('extensions.autoUpdate')) refreshUpdateNotice()
   }))
 
   try {
@@ -4254,6 +4364,14 @@ function activate(context) {
     clearInterval(loginTimer)
     if (loginWatchSoon) { clearTimeout(loginWatchSoon); loginWatchSoon = null }
   } })
+  whatsNewFirstInstall = !!(context.globalState && context.globalState.get(SEEN_KEY) === undefined && !profilesLib.list(root()).length)
+  updateNotice = null
+  refreshUpdateNotice()
+  const updateFirst = setTimeout(() => { updateTick().catch(() => {}) }, UPDATE_FIRST_MS)
+  const updateTimer = setInterval(() => { updateTick().catch(() => {}) }, UPDATE_TICK_MS)
+  if (updateFirst.unref) updateFirst.unref()
+  if (updateTimer.unref) updateTimer.unref()
+  context.subscriptions.push({ dispose: () => { clearTimeout(updateFirst); clearInterval(updateTimer) } })
   if (context.globalState && context.globalState.get(SEEN_KEY) === undefined && context.globalState.get(CHECKLIST_KEY) === undefined &&
     !profilesLib.list(root()).length) {
     Promise.resolve(context.globalState.update(CHECKLIST_KEY, 'show')).then(() => postState(), () => {})
@@ -4289,6 +4407,10 @@ module.exports = {
     setSigninStart: (fn) => { signinStart = fn || ((o) => signinLib.start(o)) },
     uiAsk: (spec) => ui.ask(spec),
     setTrackerAuto: (on) => { trackerAuto = !!on },
+    setUpdateRequest: (fn) => { updateRequest = fn || null },
+    setExtensionsList: (file) => { extensionsListOverride = file || null },
+    clearUpdateMemory: () => { delete updateMemory.askedAt },
+    updateTick, refreshUpdateNotice, updateChoice, whatsNewChoice, updateNoticeNow: () => updateNotice,
     setLoginAuto: (on) => { loginAuto = !!on },
     dropSigninDir,
     setSigninDropRetryMs: (list) => { signinDropRetryMs = list || [6000, 30000] },

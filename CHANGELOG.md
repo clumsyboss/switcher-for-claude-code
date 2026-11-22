@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1
+
+- **Tells you when a newer version is out.** Once a day the Switcher asks GitHub for its latest release and, when there's a newer one, says so at the top of the Accounts page and with a small mark in the status bar, with **Update**, **What's new** and **Later**. It sends nothing about you (GitHub sees your internet address and the time, as for any website); **Later** keeps one version quiet for 7 days; turn it off with the **Check for Updates** setting in each editor.
+- **Says what's new after an update,** once, at the top of the Accounts page.
+
 ## 1.5.0
 
 - **A list view for many accounts.** One line per account, with a labelled bar for each limit and an **Active** marker. Switch between cards and list on the page's tools line.

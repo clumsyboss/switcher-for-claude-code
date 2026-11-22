@@ -60,8 +60,27 @@ check('innerHTML is used once, for the built-in SVG icons only', (js.match(/inne
   /span\.innerHTML = '<svg class="i '/.test(js))
 check('account names, emails and folders go in as text', /text: a\.label/.test(js) && /text: p\.folder/.test(js))
 check('no eval, no Function, no network', !/\beval\(|new Function|fetch\(|XMLHttpRequest|WebSocket/.test(js))
+console.log('\n-- the update notices --')
+const updBlock = (js.match(/const u = s\.update[\s\S]*?\n    if \(s\.registryError\)/) || [''])[0]
+check('"Switcher X is available. You have Y." at the top of the page, before every other notice',
+  /text: 'Switcher ' \+ u\.version \+ ' is available\. You have ' \+ u\.current \+ '\.'/.test(updBlock) &&
+  js.indexOf('const u = s.update') < js.indexOf('if (s.registryError)'))
+check('its notes go in as text, never as HTML or a link', /text: String\(u\.notes\)/.test(updBlock) && !/href|innerHTML|u\.url/.test(updBlock))
+check('already on disk: one quiet line, "Restart extensions to finish updating to X.", with no buttons',
+  /u\.restart\) \{\s*(?:\/\/[^\n]*\n\s*)?out\.push\(h\('div', \{ class: 'muted upd-restart', text: 'Restart extensions to finish updating to ' \+ u\.version \+ '\.' \}\)\)\s*\} else if/.test(updBlock))
+check('three choices: Update, What\'s new, Later', ["choice: 'update' }) }, 'Update')", "choice: 'notes' }) }, 'What’s new')",
+  "choice: 'later' }) }, 'Later')"].every((s) => updBlock.includes(s)), updBlock.slice(0, 200))
+check('"Updated to X" with its headlines as text, See all changes and a close button',
+  /text: 'Updated to ' \+ w\.version/.test(updBlock) && /h\('li', \{ text: t(, title: t)? \}\)/.test(updBlock) &&
+  updBlock.includes("choice: 'all' }) }, 'See all changes')") && updBlock.includes("choice: 'close' })"))
+check('not while the welcome dialog shows its own what\'s new', /w && typeof w\.version === 'string' && !s\.welcome/.test(updBlock))
 check('it never stores anything itself', !/localStorage|sessionStorage|indexedDB|setState\(/.test(js))
 const css = fs.readFileSync(path.join(__dirname, '..', 'media', 'accounts.css'), 'utf8')
+const noticeCls = ((updBlock.match(/class: '(banner [\w -]+)' \}, icon\('sparkle'\)/) || [])[1] || '').split(' ')
+const welcomeList = (js.match(/h\('ul', \{ class: '([\w-]+)' \}, items\.map/) || [])[1]
+check('the "Updated to" notice has a class of its own, not the one the welcome dialog\'s list is styled by',
+  noticeCls.length === 2 && noticeCls[0] === 'banner' && !!welcomeList && !noticeCls.includes(welcomeList) &&
+  css.includes('.' + noticeCls[1]) && css.includes('.' + welcomeList + ' {'), noticeCls.join(' ') + ' / ' + welcomeList)
 check('the stylesheet loads nothing from outside', !/url\(\s*['"]?https?:/.test(css) && !/@import/.test(css))
 const durations = (css.match(/[\s,(](\d*\.?\d+)(m?s)\b/g) || [])
   .map((d) => d.trim().replace(/^[,(]/, '')).map((d) => d.endsWith('ms') ? parseFloat(d) : parseFloat(d) * 1000)

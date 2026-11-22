@@ -3,7 +3,7 @@
   "displayName": "Switcher for Claude Code (Experimental) [Unofficial]",
   "description": "Switch between multiple Claude Code accounts in one click. See every account's 5-hour and weekly usage limits, auto-continue chats when a limit hits, and pin folders or chats to their own Claude account. Unofficial; not affiliated with Anthropic.",
   "icon": "media/icon.png",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "publisher": "clumsyboss",
   "private": true,
   "license": "MIT",
@@ -16,7 +16,7 @@
   },
   "scripts": {
     "vscode:uninstall": "node ./scripts/uninstall.js",
-    "test": "node test/harness.js && node test/claude.test.js && node test/plans.test.js && node test/welcome.test.js && node test/chatpins.test.js && node test/logins.test.js && node test/signin.test.js && node test/health.test.js && node test/uninstall.test.js && node test/hub-contract.test.js && node test/requests.test.js && node test/profiles.test.js && node test/switch.test.js && node test/preferences.test.js && node test/artifacts.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js && node test/autocontinue.test.js && node test/cards.test.js && node test/guard.test.js",
+    "test": "node test/harness.js && node test/claude.test.js && node test/plans.test.js && node test/welcome.test.js && node test/chatpins.test.js && node test/logins.test.js && node test/signin.test.js && node test/health.test.js && node test/uninstall.test.js && node test/hub-contract.test.js && node test/requests.test.js && node test/profiles.test.js && node test/switch.test.js && node test/preferences.test.js && node test/artifacts.test.js && node test/edition.test.js && node test/secrets.test.js && node test/macos.test.js && node test/live.test.js && node test/tracker.test.js && node test/windows.test.js && node test/page.test.js && node test/move.test.js && node test/kickoff.test.js && node test/context.test.js && node test/fsx.test.js && node test/store.test.js && node test/autocontinue.test.js && node test/cards.test.js && node test/guard.test.js && node test/updates.test.js",
     "stage": "node build.js --no-package",
     "package": "node build.js",
     "package:main": "node build.js main",
@@ -202,6 +202,12 @@
           "default": true,
           "scope": "machine",
           "description": "Show how many days the active account's main and pinning logins have left, after the usage figures in the status bar, such as 16d and 23d."
+        },
+        "claudeswitcher.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Once a day, ask GitHub whether a newer Switcher has been released, and say so on the Accounts page and in the status bar. It sends nothing about you or your accounts; like any website you visit, GitHub sees your internet address and the time. This setting belongs to each editor: off here stops this editor asking and showing, while another editor on the same PC with it on still asks once a day."
         },
         "claudeswitcher.usageIcon": {
           "type": "string",
