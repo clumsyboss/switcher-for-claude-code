@@ -3,7 +3,8 @@ const os = require('os')
 const path = require('path')
 
 const KEY = 'claudeCode.claudeProcessWrapper'
-const PRODUCTS = ['Code', 'Code - Insiders']
+const PRODUCTS = ['Code', 'Code - Insiders', 'Cursor', 'Cursor Nightly', 'Windsurf', 'Windsurf - Next', 'VSCodium', 'VSCodium - Insiders',
+  'Code - OSS', 'Antigravity', 'Kiro', 'Trae', 'Positron']
 
 function pathFor(platform) { return platform === 'win32' ? path.win32 : path.posix }
 
@@ -20,10 +21,10 @@ function userDirs(opts) {
   return PRODUCTS.map((name) => p.join(base, name, 'User'))
 }
 
-function settingsFiles(opts) {
+function settingsFiles(opts, dirs) {
   const p = pathFor((opts && opts.platform) || process.platform)
   const out = []
-  for (const dir of userDirs(opts)) {
+  for (const dir of dirs || userDirs(opts)) {
     out.push(p.join(dir, 'settings.json'))
     let profiles = []
     try { profiles = fs.readdirSync(p.join(dir, 'profiles')) } catch {  }
@@ -141,14 +142,55 @@ function writeInPlace(file, text) {
   }
 }
 
+function lib(name) {
+  try { return require(path.join(__dirname, '..', 'lib', name)) } catch { return null }
+}
+
+function ownUserDirs(o, root, ext) {
+  const editors = lib('editors.js')
+  if (!editors) return userDirs(o)
+  let list = []
+  let others = []
+  try { list = editors.read(root); others = editors.othersInstalled(root, ext) } catch {  }
+  const up = (d) => (editors.userRootOf ? editors.userRootOf(d) : d)
+  const own = list.filter((e) => editors.same(e.ext, ext)).map((e) => up(e.user))
+  if (own.length) return own.filter((d, i) => own.findIndex((x) => editors.same(x, d)) === i)
+  const all = [...userDirs(o), ...list.map((e) => up(e.user))]
+  return all.filter((d, i) => all.findIndex((x) => editors.same(x, d)) === i && !others.some((e) => editors.same(up(e.user), d)))
+}
+
+function cleanShared(root, home, ext) {
+  const file = path.join(home, '.claude', 'settings.json')
+  try {
+    const editors = lib('editors.js')
+    const others = editors ? editors.othersInstalled(root, ext) : []
+    if (others.length) return { file, changed: false, skipped: 'installed in another editor' }
+    const store = lib('store.js')
+    const artifacts = lib('artifacts.js')
+    if (!store || !artifacts) return null
+    const added = store.getArtifactsAdded(root)
+    const active = store.getActive(root)
+    const wroteOff = !!active && store.getArtifacts(root, active) === 'off'
+    if (!added && !wroteOff) return null
+    const r = artifacts.setOff(false, { home, keepKey: !wroteOff }, root)
+    return { file, changed: !!(r && r.changed) }
+  } catch (e) {
+    return { file, changed: false, error: String((e && e.code) || (e && e.message) || e) }
+  }
+}
+
 function run(opts) {
   const results = []
   try {
     const o = opts || {}
     const platform = o.platform || process.platform
     const home = o.home || os.homedir()
-    const binDir = pathFor(platform).join(home, '.claude-switcher', 'bin')
-    const files = o.files || settingsFiles(Object.assign({}, o, { platform, home }))
+    const root = o.root || pathFor(platform).join(home, '.claude-switcher')
+    const ext = o.ext || path.join(__dirname, '..')
+    const binDir = pathFor(platform).join(root, 'bin')
+    const oo = Object.assign({}, o, { platform, home })
+    let files = o.files
+    if (!files) { try { files = settingsFiles(oo, ownUserDirs(oo, root, ext)) } catch { files = settingsFiles(oo) } }
     for (const file of files) {
       try {
         let text
@@ -162,15 +204,25 @@ function run(opts) {
         results.push({ file, changed: false, error: String((e && e.code) || (e && e.message) || e) })
       }
     }
+    if (o.shared !== false) {
+      const s = cleanShared(root, home, ext)
+      if (s) results.push(Object.assign({ shared: true }, s))
+    }
+    const editors = lib('editors.js')
+    if (editors) editors.forget(root, ext)
   } catch {  }
   return results
 }
 
-module.exports = { KEY, userDirs, settingsFiles, pointsInto, tokens, removeWrapperSetting, run }
+module.exports = { KEY, PRODUCTS, userDirs, settingsFiles, pointsInto, tokens, removeWrapperSetting, run }
 
 if (require.main === module) {
   try {
-    for (const r of run()) if (r.changed || r.error) console.log((r.changed ? 'removed the pin wrapper setting from ' : 'could not update ') + r.file + (r.error ? ' (' + r.error + ')' : ''))
+    for (const r of run()) {
+      if (r.changed || r.error) {
+        console.log((r.changed ? (r.shared ? 'removed the Artifacts deny rules from ' : 'removed the pin wrapper setting from ') : 'could not update ') + r.file + (r.error ? ' (' + r.error + ')' : ''))
+      }
+    }
   } catch {  }
   process.exitCode = 0
 }

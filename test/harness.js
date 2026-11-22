@@ -257,13 +257,19 @@ async function main() {
     { name: 'CLAUDE_CONFIG_DIR', value: 'C:\\old\\per-window' }, { name: 'KEEP_ME', value: 'yes' }]
   signInLive('work@example.com', 'uuid-w', 'RT-WORK', 30 * 60e3)
   const mainState = new Map()
-  const ctx = { subscriptions: [], globalState: { get: (k) => mainState.get(k), update: async (k, v) => { mainState.set(k, v) } } }
+  const ctx = { subscriptions: [], globalState: { get: (k) => mainState.get(k), update: async (k, v) => { mainState.set(k, v) } },
+    extensionPath: path.join(__dirname, '..'), globalStorageUri: { fsPath: path.join(TEST_ROOT, 'SomeEditor', 'User', 'globalStorage', 'publisher.switcher') } }
   q.warn.push('Clear It')
   ext._test.setTrackerAuto(false)
   ext._test.setLoginAuto(false)
   ext.activate(ctx)
   await tick()
   check('root directory created', fs.existsSync(TEST_ROOT))
+  {
+    const ed = require('../lib/editors.js').read(TEST_ROOT)
+    check('activation records this editor\'s User folder and the switcher\'s folder, for the uninstall script',
+      ed.length === 1 && ed[0].user === path.join(TEST_ROOT, 'SomeEditor', 'User') && ed[0].ext === path.join(__dirname, '..'), JSON.stringify(ed))
+  }
   check('a machine-wide CLAUDE_CONFIG_DIR is only cleared after asking (M7)',
     messages.some((m) => m.startsWith('WARN: Claude Code is set to use CLAUDE_CONFIG_DIR=')))
   const manifestIds = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
@@ -612,6 +618,7 @@ async function main() {
   await ext._test.onPageMessage({ type: 'artifacts', name: 'dana', on: false })
   check('off for the live account writes enableArtifact: false', readJson(SETTINGS).enableArtifact === false)
   check('and keeps every other setting', readJson(SETTINGS).theme === 'kept')
+  check('and denies the tools that publish to claude.ai', require('../lib/artifacts').DENY.every((e) => readJson(SETTINGS).permissions.deny.includes(e)))
   check('the page shows it off', ext._test.pageState().accounts.find((a) => a.name === 'dana').artifactsOff === true)
   check('Show Status lists it', (await ext._test.onPageMessage({ type: 'status' }), messages.some((m) => /dana.*artifacts:off/.test(m))))
   q.info.push('Not Now')
@@ -619,6 +626,7 @@ async function main() {
   check('Switch on a card switches', readLive().claudeAiOauth.refreshToken.startsWith('RT-WORK'))
   check('switching to an account with Artifacts on removes the setting', !('enableArtifact' in readJson(SETTINGS)) &&
     readJson(SETTINGS).theme === 'kept')
+  check('and the deny rules it added', !('permissions' in readJson(SETTINGS)) && store.getArtifactsAdded(TEST_ROOT) === null)
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: false })
   check('off for the new live account', readJson(SETTINGS).enableArtifact === false)
   await ext._test.onPageMessage({ type: 'artifacts', name: 'work', on: true })
@@ -1000,6 +1008,113 @@ async function main() {
     m.includes('"Fix the tests" stopped at its 5-hour limit on ') && /It's pinned to .+, so it stays on that account\./.test(m)), messages.slice(askedP).join(' || '))
   chatPinsLib.remove(TEST_ROOT, LSID)
   store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+
+  console.log('\n-- 1.5: the page\'s own order, its settings, extra usage, "has room again" --')
+  {
+    const ps = () => ext._test.pageState()
+    const names15 = () => ps().accounts.map((a) => a.name)
+    const az = names15()
+    const last = az[az.length - 1]
+    await ext._test.onPageMessage({ type: 'setting', key: 'accountOrder', value: [last, 'nobody', last, 42] })
+    check('the saved order keeps only saved accounts, each once', JSON.stringify(ext._test.prefOf('accountOrder')) === JSON.stringify([last]),
+      JSON.stringify(ext._test.prefOf('accountOrder')))
+    check('cards follow it; the rest go last, by name', JSON.stringify(names15()) === JSON.stringify([last].concat(az.slice(0, -1))), names15().join(','))
+    await ext._test.onPageMessage({ type: 'setting', key: 'accountOrder', value: 'eve' })
+    check('an order that is not a list is ignored', JSON.stringify(ext._test.prefOf('accountOrder')) === JSON.stringify([last]))
+    profiles.writeMeta(TEST_ROOT, 'zz15', { email: 'zz15@example.com', capturedAt: new Date().toISOString() })
+    fs.writeFileSync(path.join(profiles.profilesDir(TEST_ROOT), 'zz15.enc'), 'x')
+    check('a new account goes last', names15().at(-1) === 'zz15' && names15()[0] === last, names15().join(','))
+    await ext._test.onPageMessage({ type: 'setting', key: 'accountOrder', value: ['zz15', last] })
+    check('and can be moved first', names15()[0] === 'zz15')
+    profiles.remove(TEST_ROOT, 'zz15')
+    check('a forgotten account drops out of the order', JSON.stringify(ext._test.prefOf('accountOrder')) === JSON.stringify([last]) &&
+      !names15().includes('zz15'), names15().join(','))
+    const extSrc = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8')
+    check('the switch list and the pin list follow the order too', (extSrc.match(/inOrder\(profilesLib\.list\(root\(\)\)\)/g) || []).length === 3 &&
+      !/\.sort\(byLabel\)/.test(extSrc))
+
+    for (const k of ['listView', 'groupByOrg']) {
+      check(k + ' is off at first', ps().prefs[k] === false)
+      await ext._test.onPageMessage({ type: 'setting', key: k, value: true })
+      check(k + ' is saved', ps().prefs[k] === true)
+      await ext._test.onPageMessage({ type: 'setting', key: k, value: 'yes' })
+      check(k + ': only true or false', ps().prefs[k] === true)
+      await ext._test.onPageMessage({ type: 'setting', key: k, value: false })
+    }
+    check('the plan setting is gone', !('plan' in ps().prefs))
+    check('dismissed notes are empty at first', JSON.stringify(ps().prefs.dismissedNotes) === '{}')
+    await ext._test.onPageMessage({ type: 'setting', key: 'dismissedNotes', value: { 'eve:hint': 'wk:2026-11-30T10:00:00Z', 'eve:extra': 'mo:2026-11', 'nobody:hint': 'x',
+      'eve:other': 'y', 'eve:fake': 5, [last + ':extra']: 'z'.repeat(500) } })
+    check('dismissed notes keep saved accounts\' hint and extra only', JSON.stringify(ps().prefs.dismissedNotes) ===
+      JSON.stringify({ 'eve:hint': 'wk:2026-11-30T10:00:00Z', 'eve:extra': 'mo:2026-11' }), JSON.stringify(ps().prefs.dismissedNotes))
+    await ext._test.onPageMessage({ type: 'setting', key: 'dismissedNotes', value: ['eve:hint'] })
+    check('and a list is not a map', Object.keys(ps().prefs.dismissedNotes).length === 2)
+    {
+      const dir = profiles.profilesDir(TEST_ROOT), away = dir + '-away'
+      const orderBefore = JSON.stringify(ext._test.prefOf('accountOrder')), notesBefore = JSON.stringify(ps().prefs.dismissedNotes)
+      fs.renameSync(dir, away)
+      try {
+        await ext._test.onPageMessage({ type: 'setting', key: 'accountOrder', value: [] })
+        await ext._test.onPageMessage({ type: 'setting', key: 'dismissedNotes', value: {} })
+      } finally { fs.renameSync(away, dir) }
+      check('an empty account list does not wipe the saved order or notes',
+        JSON.stringify(ext._test.prefOf('accountOrder')) === orderBefore && JSON.stringify(ps().prefs.dismissedNotes) === notesBefore && orderBefore !== '[]' && notesBefore !== '{}',
+        orderBefore + ' ' + notesBefore)
+    }
+    await ext._test.onPageMessage({ type: 'setting', key: 'dismissedNotes', value: {} })
+    await ext._test.onPageMessage({ type: 'setting', key: 'accountOrder', value: [] })
+    check('no "This chat" row in 1.5.0', !('thisChat' in ps()))
+    check('dialogs carry no Beta tags', !/betaButtons|\bbeta: /.test(extSrc))
+
+    const soon = (ms) => new Date(Date.now() + ms).toISOString()
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [{ kind: 'session', percent: 20, resets_at: soon(3600e3) }],
+      extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1234, currency: 'USD', decimal_places: 2 } }, Date.now())
+    const eveExtra = () => ps().accounts.find((a) => a.name === 'eve').extra
+    check('extra usage reaches the card in whole money', JSON.stringify(eveExtra()) === JSON.stringify({ used: 12.34, limit: 50, currency: '$' }), JSON.stringify(eveExtra()))
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [], extra_usage: { is_enabled: false, monthly_limit: 4000, used_credits: 0 } }, Date.now())
+    check('and none when it is off', eveExtra() === null)
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [], extra_usage: { is_enabled: true, monthly_limit: 12500, used_credits: 3670, currency: 'EUR', decimal_places: 2 } }, Date.now())
+    check('the currency the API gives, on the card and in the hover', eveExtra().currency === '€' &&
+      usageLib.extraText(usageLib.shape({ utilization: { limits: [], extra_usage: { is_enabled: true, monthly_limit: 12500, used_credits: 3670, currency: 'EUR', decimal_places: 2 } } })) === '€36.70 of €125.00')
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [], extra_usage: { is_enabled: true, monthly_limit: 50000, used_credits: 1234, currency: 'JPY' } }, Date.now())
+    check('a currency without minor units counts whole units', JSON.stringify(eveExtra()) === JSON.stringify({ used: 1234, limit: 50000, currency: '¥' }), JSON.stringify(eveExtra()))
+    const eveAt = Date.now() - 10 * 60e3
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [{ kind: 'session', percent: 20, resets_at: soon(3600e3) }] }, eveAt)
+    check('each card has its own reading time', ps().accounts.find((a) => a.name === 'eve').fetchedAtMs === eveAt)
+
+    const eveLabel = ps().accounts.find((a) => a.name === 'eve').label
+    const roomMsgs = (from) => messages.slice(from).filter((m) => m.includes(eveLabel + ' has room again'))
+    const t0 = Math.floor(Date.now() / 1000) * 1000
+    const usedUp = (resetAgoMs) => usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+      { kind: 'session', percent: 100, resets_at: new Date(t0 - resetAgoMs).toISOString() }, { kind: 'weekly_all', percent: 40, resets_at: soon(86400e3) }] },
+      t0 - Math.max(resetAgoMs, 0) - 30 * 60e3)
+    ext._test.roomReset()
+    const activeNow = profiles.activeProfile(TEST_ROOT)
+    check('(eve is not the active account here)', activeNow !== 'eve', activeNow)
+    usedUp(-30 * 60e3)
+    const mk = messages.length
+    const calls = trackerCalls.length
+    await ext._test.roomBackCheck()
+    check('used up, before its reset: no notice and no reading', roomMsgs(mk).length === 0 && trackerCalls.length === calls)
+    usedUp(5 * 60e3)
+    settings.claudeswitcher = { ...(settings.claudeswitcher || {}), trackAllAccounts: false }
+    await ext._test.roomBackCheck()
+    check('tracking off: no notice', roomMsgs(mk).length === 0 && trackerCalls.length === calls)
+    settings.claudeswitcher.trackAllAccounts = true
+    ext._test.roomReset()
+    usedUp(5 * 60e3)
+    await ext._test.roomBackCheck()
+    check('past its reset, it reads the account once and says it has room again', roomMsgs(mk).length === 1 &&
+      trackerCalls.slice(calls).filter((c) => c === 'usage:AT-EVE').length === 1, messages.slice(mk).join(' || '))
+    await ext._test.roomBackCheck()
+    await ext._test.roomBackCheck()
+    check('once per reset', roomMsgs(mk).length === 1)
+    ext._test.roomReset()
+    usedUp(5 * 60e3)
+    await ext._test.roomBackCheck()
+    check('not again for the same reset, even from a fresh window', roomMsgs(mk).length === 1)
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [] }, Date.now())
+  }
 
   console.log('\n-- switching early, before the limit stops anything --')
   const inHours = (h) => new Date(Date.now() + h * 3600e3).toISOString()
@@ -1383,7 +1498,7 @@ async function main() {
 
     console.log('\n-- 1.4: the ⚙ settings --')
     const prefs = ext._test.pageState().prefs
-    check('defaults: context off, the rest on, Accounts in a tab', prefs.context === false && prefs.tint === true && prefs.plan === true &&
+    check('defaults: context off, the rest on, Accounts in a tab', prefs.context === false && prefs.tint === true &&
       prefs.cardToggles === true && prefs.statusUsage === true && prefs.statusLoginDays === true && prefs.confirmOrgSwitch === true &&
       prefs.trackAll === true && prefs.accountsView === 'tab', JSON.stringify(prefs))
     await ext._test.onPageMessage({ type: 'setting', key: 'tint', value: false })
@@ -1584,6 +1699,10 @@ async function main() {
     const chatTab = { label: 'CLAUDE_CONFIG_DIR enviro\u2026', input: { viewType: 'mainThreadWebview-claudeVSCodePanel' } }
     const otherTab = { label: 'CLAUDE_CONFIG_DIR', input: { viewType: 'mainThreadWebview-claudeVSCodePanel' } }
     vscode.window.tabGroups = { all: [{ tabs: [chatTab, otherTab] }], close: async (tabs) => { closedTabs.push(...tabs) } }
+    const pinRecFile = (n) => path.join(CLAUDE_DIR, 'sessions', 'pins-' + (n || 1) + '.json')
+    const liveRec = (id, status, n, extra) => { fs.mkdirSync(path.dirname(pinRecFile(n)), { recursive: true }); fs.writeFileSync(pinRecFile(n), JSON.stringify({ pid: process.pid, sessionId: id, status, statusUpdatedAt: Date.now(), ...(extra || {}) })) }
+    const endRec = (n) => fs.rmSync(pinRecFile(n), { force: true })
+    liveRec(CHAT, 'idle')
     await loginsLib.remove(TEST_ROOT, 'dana')
     signinQ.push({ email: 'dana@example.com', uuid: 'uuid-d', rt: 'RT-D8', days: 33.5 })
     q.quick.push(longTitle); q.quick.push('dana'); q.warn.push({ value: 'Continue' }); q.info.push('Cancel')
@@ -1599,6 +1718,7 @@ async function main() {
     check('its tab is found by Claude Code\'s shortened title, and only that one is closed',
       closedTabs.length === 1 && closedTabs[0] === chatTab, JSON.stringify(closedTabs.map((t) => t.label)))
     delete vscode.window.tabGroups
+    endRec()
     const pinned = chatPinsLib.read(TEST_ROOT)
     check('Pin Chat lists the folder\'s chats and pins the one picked', pinned.length === 1 && pinned[0].id === CHAT && pinned[0].name === 'dana')
     check('the wrapper\'s list has the chat, so it starts on dana\'s pinning login',
@@ -1607,6 +1727,7 @@ async function main() {
     check('then opens the chat again, so it starts on the pinned account', executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === CHAT))
     const chatRows = ext._test.pageState().chatPins
     check('the page lists the pinned chat', chatRows.length === 1 && chatRows[0].title === longTitle && chatRows[0].name === 'dana')
+    q.info.push('Unpin')
     await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
     check('Unpin on the page removes it', chatPinsLib.read(TEST_ROOT).length === 0)
     check('and with nothing pinned the wrapper setting is turned off', !settings.claudeCode.claudeProcessWrapper)
@@ -1628,6 +1749,7 @@ async function main() {
     const hiTab = { label: 'hi', input: { viewType: 'mainThreadWebview-claudeVSCodePanel' } }
     const closedHi = []
     vscode.window.tabGroups = { all: [{ tabs: [hiTab] }], close: async (tabs) => { closedHi.push(...tabs) } }
+    liveRec(HI, 'idle', 2)
     executed.length = 0
     let askedHi = messages.length
     q.quick.push('hi'); q.quick.push('dana'); q.info.push('Pin and reopen')
@@ -1635,15 +1757,23 @@ async function main() {
     check('the question names it by its first prompt', messages.slice(askedHi).some((m) => m.includes('Pin "hi" to')), messages.slice(askedHi).join(' / '))
     check('its open tab is found and closed, and the chat reopened', closedHi.length === 1 && closedHi[0] === hiTab &&
       executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === HI))
+    q.info.push('Unpin and reopen')
     await ext._test.onPageMessage({ type: 'unpinChat', id: HI })
+    check('unpinned from the page', !chatPinsLib.read(TEST_ROOT).some((p) => p.id === HI))
     vscode.window.tabGroups = { all: [{ tabs: [hiTab, { label: 'hi', input: { viewType: 'mainThreadWebview-claudeVSCodePanel' } }] }], close: async (tabs) => { closedHi.push(...tabs) } }
     closedHi.length = 0
     executed.length = 0
     askedHi = messages.length
     q.quick.push('hi'); q.quick.push('dana'); q.info.push('Pin and reopen')
     await registered['claudeswitcher.pinChat']()
+    check('two open chats with that title: "Pin and reopen" is not offered', !chatPinsLib.read(TEST_ROOT).some((p) => p.id === HI && p.name === 'dana') &&
+      messages.slice(askedHi).some((m) => m.includes('Pin "hi" to') && m.includes('can\'t be sure which open tab is it')), messages.slice(askedHi).join(' / '))
+    askedHi = messages.length
+    q.quick.push('hi'); q.quick.push('dana'); q.info.push('Pin')
+    await registered['claudeswitcher.pinChat']()
     check('two open chats with that title: no tab is closed, nothing reopened, and it says how to reopen it', closedHi.length === 0 &&
-      !executed.some((e) => e.id === 'claude-vscode.editor.open') && messages.slice(askedHi).some((m) => m.includes('open chats are called "hi"')))
+      !executed.some((e) => e.id === 'claude-vscode.editor.open') && messages.slice(askedHi).some((m) => m.includes('"hi" is pinned to') && m.includes('Reopen it by hand')),
+      messages.slice(askedHi).join(' / '))
     check('and no "reopened" message', !messages.slice(askedHi).some((m) => m.includes('reopened on it')))
     check('the pin is kept', chatPinsLib.read(TEST_ROOT).some((p) => p.id === HI && p.name === 'dana'))
     fs.appendFileSync(hiFile, JSON.stringify({ type: 'last-prompt', lastPrompt: 'What account are you on?', sessionId: HI }) + '\n')
@@ -1655,8 +1785,11 @@ async function main() {
     check('a chat its latest prompt renamed is found by that name and reopened (not another chat called "hi")',
       closedHi.length === 1 && closedHi[0] === renamedTab && executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === HI),
       JSON.stringify(closedHi.map((t) => t.label)))
+    q.info.push('Unpin and reopen')
     await ext._test.onPageMessage({ type: 'unpinChat', id: HI })
+    check('and unpinned again', !chatPinsLib.read(TEST_ROOT).some((p) => p.id === HI))
     delete vscode.window.tabGroups
+    endRec(2)
     fs.rmSync(hiFile)
 
     console.log('\n-- 1.4: moving a pin, a chat that is replying, Reopen now --')
@@ -1664,6 +1797,7 @@ async function main() {
     fs.mkdirSync(SESS, { recursive: true })
     const busyFile = path.join(SESS, 'busy-1.json')
     const setBusy = (id, on) => { if (on) fs.writeFileSync(busyFile, JSON.stringify({ pid: process.pid, sessionId: id, status: 'busy', statusUpdatedAt: Date.now() })); else fs.rmSync(busyFile, { force: true }) }
+    const setIdle = (id) => fs.writeFileSync(busyFile, JSON.stringify({ pid: process.pid, sessionId: id, status: 'idle', statusUpdatedAt: Date.now() }))
     signinQ.push({ email: 'finn@example.com', uuid: 'uuid-f', rt: 'RT-F', days: 30.5 })
     q.quick.push('Sign in to another account'); q.input.push({ value: 'Finn', color: 'green', icon: 'rocket' })
     q.warn.push({ value: 'No thank you', checked: false })
@@ -1688,7 +1822,7 @@ async function main() {
     check('and is not reopened yet', !executed.some((e) => e.id === 'claude-vscode.editor.open'))
     await ext._test.loginWatch()
     check('the login watch leaves it while it is still replying', ext._test.pageState().chatPins.find((p) => p.id === CHAT).waiting === true)
-    setBusy(CHAT, false)
+    setIdle(CHAT)
     await ext._test.fastTick()
     check('once the reply finished, it reopens on its account at the next 5-second check', executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === CHAT) &&
       ext._test.pageState().chatPins.find((p) => p.id === CHAT).waiting === false)
@@ -1698,8 +1832,316 @@ async function main() {
     await ext._test.onPageMessage({ type: 'reopenNow', id: CHAT })
     check('Reopen now reopens at once, mid-reply', executed.some((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === CHAT) &&
       ext._test.pageState().chatPins.find((p) => p.id === CHAT).waiting === false)
-    setBusy(CHAT, false)
+    setIdle(CHAT)
     delete vscode.window.tabGroups
+
+    console.log('\n-- 1.5.0: unpinning a chat asks first and reopens it, as pinning does --')
+    {
+      const pinOf = () => { const p = chatPinsLib.read(TEST_ROOT).find((x) => x.id === CHAT); return p ? p.name : null }
+      const opened = () => executed.filter((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === CHAT).length
+      const repinFinn = async () => { chatPinsLib.set(TEST_ROOT, CHAT, 'finn', longTitle); await ext._test.syncPins() }
+      const activeLabel = store.displayOf(TEST_ROOT, store.getActive(TEST_ROOT)).label
+      const closedU = []
+      vscode.window.tabGroups = { all: [{ tabs: [chatTab] }], close: async (t) => { closedU.push(...t) } }
+      check('(set up: pinned to finn)', pinOf() === 'finn')
+      executed.length = 0
+      let before = messages.length
+      q.info.push('Cancel')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      const asked = messages.slice(before).find((m) => m.includes('Unpin "' + longTitle + '"?'))
+      check('Unpin asks first, naming the chat and where it goes back to', !!asked && asked.includes('It goes back to ' + activeLabel), messages.slice(before).join(' / '))
+      check('cancel leaves the pin, the tab and the chat alone', pinOf() === 'finn' && closedU.length === 0 && opened() === 0)
+
+      before = messages.length
+      q.info.push('Unpin and reopen')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('its tab is open here: "Unpin and reopen", unpinned, its tab closed and the chat reopened',
+        pinOf() === null && closedU.length === 1 && closedU[0] === chatTab && opened() === 1)
+      check('and it says it reopened on the active account', messages.slice(before).some((m) => m.includes('is unpinned and reopened on ' + activeLabel)),
+        messages.slice(before).join(' / '))
+      check('the wrapper\'s list no longer has it', !wrapperList().split(/\r?\n/).includes('chat\t' + CHAT + '\tfinn'))
+
+      await repinFinn()
+      executed.length = 0; closedU.length = 0
+      setBusy(CHAT, true)
+      before = messages.length
+      q.info.push('Unpin and reopen')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('a chat that is replying is unpinned at once, but not reopened mid-reply', pinOf() === null && opened() === 0 && closedU.length === 0)
+      check('it says it reopens when the reply finishes, and offers Reopen now', messages.slice(before).some((m) => m.includes('reopens on ' + activeLabel + ' when this reply finishes')),
+        messages.slice(before).join(' / '))
+      await ext._test.fastTick()
+      check('still replying: still not reopened', opened() === 0)
+      setIdle(CHAT)
+      before = messages.length
+      await ext._test.fastTick()
+      check('once the reply finished, it reopens on the active account', opened() === 1 && closedU.length === 1 &&
+        messages.slice(before).some((m) => m.includes('finished its reply and reopened on ' + activeLabel)), messages.slice(before).join(' / '))
+
+      delete vscode.window.tabGroups
+      setBusy(CHAT, false)
+      await repinFinn()
+      executed.length = 0
+      before = messages.length
+      q.info.push('Unpin')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('its tab isn\'t open here: "Unpin", and nothing is reopened', pinOf() === null && opened() === 0 &&
+        messages.slice(before).some((m) => m.includes('Unpin "' + longTitle + '"?') && m.includes('the next time you open it')))
+      check('it says where it opens next time', messages.slice(before).some((m) => m.includes('is unpinned. It opens on ' + activeLabel + ' the next time')))
+
+      await repinFinn()
+      q.quick.push(longTitle); q.quick.push('Unpin this chat'); q.info.push('Cancel')
+      await registered['claudeswitcher.pinChat']()
+      check('the pin picker\'s Unpin this chat asks too, and cancel keeps the pin', pinOf() === 'finn')
+      q.quick.push(longTitle); q.quick.push('Unpin this chat'); q.info.push('Unpin')
+      await registered['claudeswitcher.pinChat']()
+      check('confirmed, it unpins', pinOf() === null)
+
+      const OTHER = '6b8cbf67-9999-4aaa-8bbb-dddddddddddd'
+      const sameTab = { label: chatTab.label, input: chatTab.input }
+      await repinFinn()
+      vscode.window.tabGroups = { all: [{ tabs: [sameTab] }], close: async (t) => { closedU.push(...t) } }
+      liveRec(OTHER, 'busy', 3, { name: longTitle + ' (branch)' })
+      executed.length = 0; closedU.length = 0
+      before = messages.length
+      q.info.push('Unpin and reopen')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('S1: the pinned chat isn\'t running and another chat\'s tab shows its name: "Unpin and reopen" is not offered',
+        pinOf() === 'finn' && messages.slice(before).some((m) => m.includes('Unpin "' + longTitle + '"?') && m.includes('the next time you open it')),
+        messages.slice(before).join(' / '))
+      q.info.push('Unpin')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('S1: unpinned, the other chat\'s tab never closed, nothing reopened', pinOf() === null && closedU.length === 0 &&
+        !executed.some((e) => e.id === 'claude-vscode.editor.open'))
+      await repinFinn()
+      setIdle(CHAT)
+      executed.length = 0; closedU.length = 0
+      before = messages.length
+      q.info.push('Unpin')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('S1: a second running chat with the same name: asked with "Unpin", not sure which tab is it',
+        messages.slice(before).some((m) => m.includes('Unpin "' + longTitle + '"?') && m.includes('can\'t be sure which open tab is it')), messages.slice(before).join(' / '))
+      check('S1: unpinned, no tab closed, nothing reopened, and it says to reopen it by hand, in the phone\'s words', pinOf() === null && closedU.length === 0 &&
+        opened() === 0 && messages.slice(before).some((m) => m.includes('is unpinned, but VS Code couldn\'t be sure which open tab is it') && m.includes('Reopen it by hand')),
+        messages.slice(before).join(' / '))
+      endRec(3)
+      await repinFinn()
+      vscode.window.tabGroups = { all: [{ tabs: [chatTab, sameTab] }], close: async (t) => { closedU.push(...t) } }
+      executed.length = 0; closedU.length = 0
+      before = messages.length
+      q.info.push('Unpin')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('S1: two open tabs with its name: unpinned, neither closed, nothing reopened', pinOf() === null && closedU.length === 0 && opened() === 0 &&
+        messages.slice(before).some((m) => m.includes('Reopen it by hand')), messages.slice(before).join(' / '))
+      delete vscode.window.tabGroups
+      await repinFinn()
+      before = messages.length
+      q.info.push('Unpin')
+      await ext._test.onPageMessage({ type: 'unpinChat', id: CHAT })
+      check('S1: running in another window: the question says it keeps its login until it is reopened', pinOf() === null &&
+        messages.slice(before).some((m) => m.includes('not in a tab here') && m.includes('until you reopen it')), messages.slice(before).join(' / '))
+      setBusy(CHAT, false)
+    }
+
+    console.log('\n-- 1.5: pin and unpin a chat from the phone --')
+    {
+      const reqLib = require('../lib/requests.js')
+      const reqDir = reqLib.dir(TEST_ROOT)
+      const reqFiles = () => { try { return fs.readdirSync(reqDir).sort() } catch { return [] } }
+      const pinOf = () => { const p = chatPinsLib.read(TEST_ROOT).find((x) => x.id === CHAT); return p ? p.name : null }
+      const opened = () => executed.filter((e) => e.id === 'claude-vscode.editor.open' && e.args[0] === CHAT).length
+      const backdate = (id, ms) => {
+        const f = reqLib.requestFile(TEST_ROOT, id)
+        const j = JSON.parse(fs.readFileSync(f, 'utf8')); j.at = Date.now() - ms; fs.writeFileSync(f, JSON.stringify(j))
+      }
+      const closed = []
+      const reqTabs = (tabs) => { vscode.window.tabGroups = { all: [{ tabs }], close: async (t) => { closed.push(...t) } } }
+      const recFile = (n) => path.join(SESS, 'phone-' + n + '.json')
+      const setRec = (id, status, extra, n) => fs.writeFileSync(recFile(n || 1), JSON.stringify({ pid: process.pid, sessionId: id, status, statusUpdatedAt: Date.now(), ...(extra || {}) }))
+      const dropRec = (n) => fs.rmSync(recFile(n || 1), { force: true })
+      const activeLabel = store.displayOf(TEST_ROOT, store.getActive(TEST_ROOT)).label
+      chatPinsLib.remove(TEST_ROOT, CHAT)
+      await ext._test.syncPins()
+
+      reqTabs([chatTab])
+      setRec(CHAT, 'idle')
+      executed.length = 0
+      let before = messages.length
+      let rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana', device: 'Phone' })
+      check('the phone\'s request is accepted', rq.ok === true, JSON.stringify(rq))
+      await ext._test.requestsTick()
+      let res = reqLib.result(TEST_ROOT, rq.id)
+      check('a request for a chat whose tab is open here is taken at once; idle, it is pinned and reopened',
+        res && res.ok === true && res.state === 'reopened' && pinOf() === 'dana' && opened() === 1, JSON.stringify(res))
+      check('the result says so in plain words', res && res.text.includes('"' + longTitle + '" is pinned to') && res.text.includes('reopened on it'), res && res.text)
+      check('the wrapper\'s list has the pin', wrapperList().split(/\r?\n/).includes('chat\t' + CHAT + '\tdana'))
+      check('the window tells the user it came from the phone', messages.slice(before).some((m) => m.includes('Pinned "' + longTitle + '" to') && m.includes('from your phone.')),
+        messages.slice(before).join(' / '))
+      check('the request and its claim are gone, only the result is left', reqFiles().filter((f) => !f.startsWith('.alive-')).join() === rq.id + '.result.json', reqFiles().join())
+
+      executed.length = 0
+      setRec(CHAT, 'busy')
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'finn' })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('a chat that is replying: "waiting", pin written, not reopened yet', res && res.state === 'waiting' && pinOf() === 'finn' && opened() === 0, JSON.stringify(res))
+      check('the page shows it waiting', ext._test.pageState().chatPins.find((p) => p.id === CHAT).waiting === true)
+      setRec(CHAT, 'idle')
+      await ext._test.fastTick()
+      check('once the reply finished, it reopens on its new account', opened() === 1 && ext._test.pageState().chatPins.find((p) => p.id === CHAT).waiting === false)
+      check('the 5-second tick leaves this window\'s heartbeat for the hub', reqLib.alive(TEST_ROOT).some((w) => w.pid === process.pid))
+
+      executed.length = 0
+      closed.length = 0
+      setRec(CHAT, 'waiting', { waitingFor: 'approve Edit' })
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('a chat waiting on an approval counts as busy: "waiting", its tab not closed', res && res.state === 'waiting' && pinOf() === 'dana' && opened() === 0 && closed.length === 0,
+        JSON.stringify(res))
+      await ext._test.fastTick()
+      check('and it is still not reopened while the approval waits', opened() === 0 && closed.length === 0)
+      setRec(CHAT, 'idle')
+      await ext._test.fastTick()
+      check('once answered and idle, it reopens', opened() === 1 && closed.length === 1)
+      executed.length = 0
+      closed.length = 0
+      setRec(CHAT, 'waiting', { waitingFor: 'input needed' })
+      rq = reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('unpin of a chat waiting on a question: unpinned, reopened only when it finishes', res && res.state === 'unpinned' && pinOf() === null && opened() === 0 &&
+        closed.length === 0 && res.text.includes('when its current reply finishes'), JSON.stringify(res))
+      setRec(CHAT, 'idle')
+      await ext._test.fastTick()
+      check('and then it reopens', opened() === 1 && closed.length === 1)
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'finn' })
+      await ext._test.requestsTick()
+      check('(pinned to finn again for what follows)', pinOf() === 'finn' && reqLib.result(TEST_ROOT, rq.id).state === 'reopened')
+
+      executed.length = 0
+      closed.length = 0
+      setRec(CHAT, 'idle')
+      setRec('6b8cbf67-9999-4aaa-8bbb-cccccccccccc', 'busy', { name: 'CLAUDE_CONFIG_DIR enviro and the made-up rest' }, 2)
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      await ext._test.requestsTick()
+      check('a tab another running chat\'s name also matches is not taken as this chat\'s', reqLib.result(TEST_ROOT, rq.id) === null && closed.length === 0)
+      backdate(rq.id, reqLib.CLAIM_ANY_MS + 1000)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('after 10 seconds it is pinned, not reopened: "needs-reopen", the other chat\'s tab never closed',
+        res && res.state === 'needs-reopen' && pinOf() === 'dana' && opened() === 0 && closed.length === 0 && res.text.includes('Reopen it by hand'), JSON.stringify(res))
+      setRec('6b8cbf67-9999-4aaa-8bbb-cccccccccccc', 'idle', { name: 'CLAUDE_CONFIG_DIR enviro and the made-up rest' }, 2)
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'finn' })
+      backdate(rq.id, reqLib.CLAIM_ANY_MS + 1000)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('the same with the other chat idle: still not closed', res && res.state === 'needs-reopen' && opened() === 0 && closed.length === 0, JSON.stringify(res))
+      dropRec(2)
+
+      executed.length = 0
+      reqTabs([chatTab, { label: chatTab.label, input: chatTab.input }])
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      await ext._test.requestsTick()
+      check('two open tabs share its title: not sure which is it, so not taken at once', reqLib.result(TEST_ROOT, rq.id) === null)
+      backdate(rq.id, reqLib.CLAIM_ANY_MS + 1000)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('after 10 seconds: "needs-reopen", pinned, reopened by hand', res && res.state === 'needs-reopen' && pinOf() === 'dana' && opened() === 0 &&
+        res.text.includes('Reopen it by hand'), JSON.stringify(res))
+
+      delete vscode.window.tabGroups
+      executed.length = 0
+      chatPinsLib.remove(TEST_ROOT, CHAT)
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      backdate(rq.id, reqLib.CLAIM_ANY_MS + 1000)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('running but shown in no tab here: after 10 seconds pinned, "needs-reopen"', res && res.state === 'needs-reopen' && pinOf() === 'dana' && opened() === 0, JSON.stringify(res))
+
+      dropRec()
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'finn' })
+      await ext._test.requestsTick()
+      check('a chat no tab here shows is left alone at first', reqLib.result(TEST_ROOT, rq.id) === null && fs.existsSync(reqLib.requestFile(TEST_ROOT, rq.id)) && pinOf() === 'dana')
+      backdate(rq.id, reqLib.CLAIM_ANY_MS + 1000)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('after 10 seconds unclaimed, this window takes it: "pinned", no reopen', res && res.state === 'pinned' && pinOf() === 'finn' && opened() === 0, JSON.stringify(res))
+      check('and the phone is told it moves the next time it opens', res && res.text.includes('the next time it opens'), res && res.text)
+
+      reqTabs([chatTab])
+      rq = reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT })
+      const other = process.ppid
+      check('another window claims it first (the rename only one can win)', !!reqLib.claim(TEST_ROOT, rq.id, other) && !reqLib.claim(TEST_ROOT, rq.id, process.pid))
+      await ext._test.requestsTick()
+      check('so this window does nothing with it', pinOf() === 'finn' && reqLib.result(TEST_ROOT, rq.id) === null && opened() === 0)
+      fs.rmSync(reqLib.claimFile(TEST_ROOT, rq.id, other), { force: true })
+
+      setRec(CHAT, 'idle')
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      await Promise.all([ext._test.requestsTick(), ext._test.requestsTick()])
+      check('two checks at once handle it once', opened() === 1 && reqLib.result(TEST_ROOT, rq.id).state === 'reopened')
+
+      executed.length = 0
+      before = messages.length
+      rq = reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('Unpin from the phone: unpinned and reopened', res && res.ok === true && res.state === 'unpinned' && pinOf() === null && opened() === 1 &&
+        res.text.includes('reopened on ' + activeLabel + '.'), JSON.stringify(res))
+      check('and the window says "Unpinned ... from your phone."', messages.slice(before).some((m) => m.includes('Unpinned "' + longTitle + '" from your phone.')))
+      check('the wrapper\'s list drops it', !wrapperList().includes(CHAT))
+      rq = reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('Unpin of a chat that isn\'t pinned says so', res && res.ok === true && res.text.includes('wasn\'t pinned'), JSON.stringify(res))
+
+      const seven = []
+      for (let i = 0; i < 7; i++) seven.push(reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT }).id)
+      await ext._test.requestsTick()
+      const answered = () => seven.filter((id) => reqLib.result(TEST_ROOT, id)).length
+      check('seven requests at once: five are handled in one tick', answered() === 5, String(answered()))
+      await ext._test.requestsTick()
+      check('and the other two at the next', answered() === 7, String(answered()))
+
+      const madeUpFolder = path.join(TEST_ROOT, 'made-up-project')
+      store.setPin(TEST_ROOT, madeUpFolder, 'finn')
+      setRec(CHAT, 'idle', { cwd: madeUpFolder })
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      await ext._test.requestsTick()
+      executed.length = 0
+      rq = reqLib.submit(TEST_ROOT, { kind: 'unpinChat', sessionId: CHAT })
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      const finnLabel = store.displayOf(TEST_ROOT, 'finn').label
+      check('unpin in a pinned folder names the folder\'s account it reopens on', res && res.state === 'unpinned' && opened() === 1 &&
+        res.text.includes('reopened on ' + finnLabel + ' (its folder\'s account)'), JSON.stringify(res))
+      check('and the account it falls back to is the folder\'s', ext._test.fallbackAccount(CHAT).name === 'finn')
+      store.setPin(TEST_ROOT, madeUpFolder, null)
+      await ext._test.syncPins()
+      check('without the folder pin it is the active account', ext._test.fallbackAccount(CHAT).name === store.getActive(TEST_ROOT))
+      setRec(CHAT, 'idle')
+
+      executed.length = 0
+      const refused = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'work' })
+      check('submit refuses an account with no pinning login', refused.ok === false && refused.reason === 'no-pinning-login', JSON.stringify(refused))
+      const badId = 'abcdef0123456789'
+      fs.writeFileSync(reqLib.requestFile(TEST_ROOT, badId), JSON.stringify({ v: 1, id: badId, kind: 'pinChat', sessionId: CHAT, account: 'nobody', from: 'hub', at: Date.now() }))
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, badId)
+      check('a request for an account that isn\'t saved is answered ok:false, and nothing is pinned', res && res.ok === false && pinOf() === null && opened() === 0 &&
+        res.text.includes('no saved account'), JSON.stringify(res))
+
+      delete vscode.window.tabGroups
+      rq = reqLib.submit(TEST_ROOT, { kind: 'pinChat', sessionId: CHAT, account: 'dana' })
+      backdate(rq.id, reqLib.EXPIRE_MS + 1000)
+      reqLib.sweep(TEST_ROOT)
+      await ext._test.requestsTick()
+      res = reqLib.result(TEST_ROOT, rq.id)
+      check('an expired request is answered "expired" and never acted on', res && res.ok === false && res.state === 'expired' && pinOf() === null, JSON.stringify(res))
+      dropRec()
+      fs.rmSync(reqDir, { recursive: true, force: true })
+    }
     chatPinsLib.remove(TEST_ROOT, CHAT)
 
     console.log('\n-- 1.4: Sign in again on the card --')
@@ -1824,6 +2266,7 @@ async function main() {
     check('Remote Control off writes the pinned chats\' settings file', fs.existsSync(setFile) && readJson(setFile).disableRemoteControl === true)
     await ext._test.onPageMessage({ type: 'artifacts', name: 'finn', on: false })
     check('Artifacts off adds to it', readJson(setFile).enableArtifact === false && readJson(setFile).disableRemoteControl === true)
+    check('with the deny rules for publishing to claude.ai', JSON.stringify(readJson(setFile).permissions) === JSON.stringify({ deny: require('../lib/artifacts').DENY }))
     await ext._test.onPageMessage({ type: 'remote', name: 'finn', on: true })
     await ext._test.onPageMessage({ type: 'artifacts', name: 'finn', on: true })
     check('it never turns anything on, and is removed when nothing is off', !fs.existsSync(setFile))

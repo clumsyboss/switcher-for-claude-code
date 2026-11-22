@@ -11,7 +11,7 @@ its limit, and pin a folder or a single chat to its own account.
 - **Sign in on the page.** **Add account** and **Sign in again** no longer open
   a terminal. The page walks you through the browser sign-in, with a
   **Paste code** box if the browser can't hand it back.
-- **Pinning logins (Beta).** An account can have a second login of its own for
+- **Pinning logins.** An account can have a second login of its own for
   pinned chats and folders, so they never sign out your other chats. It
   replaces pin keys.
 - **Days left on every login.** A thin line round each card, and the status bar
@@ -105,7 +105,7 @@ Palette (`Ctrl+Shift+P`).
 
 On a fresh install the page also shows a short **Getting started** list that
 ticks itself off as you go: save the account you're using, add another account,
-and (optional, Beta) add a pinning login.
+and (optional) add a pinning login.
 
 ## The Accounts page
 
@@ -137,21 +137,20 @@ exact days (see [Logins](#logins-main-and-pinning)).
 | Turn Remote Control off for one account | The **Remote Control** switch on its card |
 | Stop one account from publishing Artifacts | The **Artifacts** switch on its card |
 | Sign in again after a login expires | **Sign in again** on the card (or **⋯ → Sign in again**) |
-| Give an account a pinning login (Beta) | **⋯ → Add account for pinning** |
+| Give an account a pinning login | **⋯ → Add account for pinning** |
 | See or change what an account has pinned | The blue **pin** button on its card |
 | Test that everything works | **⚙ → Check everything** |
 | Remove an account from the switcher | **⋯ → Forget account** (its pinning login goes too, and its chats and folders are unpinned; your Claude account itself is untouched) |
-| Pin a chat (Beta) | **Pin chat** |
-| Pin a folder to an account (Beta) | **Pin a folder…** under Folder pins |
-| Unpin a chat or folder | **Unpin** next to it |
+| Pin a chat | **Pin chat** |
+| Pin a folder to an account | **Pin a folder…** under Folder pins |
+| Unpin a chat or folder | **Unpin** next to it (a chat asks first, then reopens) |
 
 The button left of **Pin chat** switches to a **compact view**. Each card's top
 becomes one line, with a smaller picture and the email moved into the name's
 tooltip. The usage bars and toggles sit closer and the padding shrinks, but the
 text keeps its size. The page eases into the new view, or switches at once if
 your system asks for reduced motion, and it remembers your choice. In a narrow
-sidebar the Pin buttons shorten to **Chat** and **Folder**, then Beta to **B**,
-before anything wraps.
+sidebar the Pin buttons shorten to **Chat** and **Folder** before anything wraps.
 
 It opens as an **editor tab**, like a file. It also lives in its own **sidebar
 view**, in a compact one-column layout. Both are always available; the
@@ -295,7 +294,7 @@ Three words are used throughout:
   switch changes it.
 - **Main login:** the sign-in the switcher saves for each account and switches
   to. Every account has one.
-- **Pinning login (Beta):** a second, separate sign-in of the *same* account,
+- **Pinning login:** a second, separate sign-in of the *same* account,
   used only by chats and folders pinned to it. It's optional. It exists
   because two places can't share one login: each time a login is used it is
   replaced, so two chats on the same one would sign each other out.
@@ -377,7 +376,7 @@ Typing `/login` in Claude Code works and is picked up:
   before you answer, it asks again. Adding a new pinning login meanwhile waits
   for those chats the same way.
 
-## Pins: a folder or a chat on its own account (Beta)
+## Pins: a folder or a chat on its own account
 
 Pin a folder to an account and every chat in that folder runs as that account,
 in every window, while everything else keeps following the switcher. Pin a
@@ -401,10 +400,17 @@ reply, the page says **Moves to (account) when this reply finishes**, and
 will be interrupted. The pin panel (the blue **pin** button on a card) lists
 what's pinned, and lets you move or unpin it.
 
+**Unpin** on a chat asks first, the same way: an open chat keeps the login it
+started on until it starts again, so **Unpin and reopen** reopens it on the
+active account (or its folder's account), when its reply finishes if it's
+replying. **Cancel** changes nothing.
+
 A chat is found by the name its tab shows. A chat with no title yet is named by
-your latest message, so **Pin and reopen** still finds it. If two open chats
-share that name, neither is closed: a notice tells you to close the right one
-and open it again from Claude Code's past conversations.
+your latest message, so **Pin and reopen** still finds it. A tab is closed and
+reopened only when the Switcher is sure it is that chat: if two open chats
+share that name, or the chat runs in another window, nothing is closed, and a
+notice tells you to reopen it by hand (close it, then open it again from Claude
+Code's past conversations).
 
 How it works:
 
@@ -427,7 +433,14 @@ How it works:
 - A wrapper you set yourself is never replaced: pins then say they can't work.
 - The window's own environment is never changed.
 - **Uninstalling** the extension removes the switcher's wrapper setting from
-  VS Code's settings again (only if it still points at the switcher's folder).
+  the editor's settings again (only if it still points at the switcher's
+  folder), in VS Code, Cursor, Windsurf, VSCodium and other editors built on
+  VS Code. The last copy to be uninstalled also takes out what **Artifacts
+  off** added to `~/.claude/settings.json`: only the deny rules it added, and
+  `"enableArtifact": false` if it wrote it. To remove them by hand, delete
+  `"enableArtifact": false` and these entries from `permissions.deny` in that
+  file: `mcp__claude_ai_Claude_Docs`, `ShareOnboardingGuide`, `PublishPlugin`,
+  `DesignSync` and `RemoteTrigger`.
 - **On macOS,** pinning logins live in the Keychain, one item per account named
   `Claude Code-credentials-<8 characters>`, not in a file.
 - Pins made with 1.3 used a separate *window login*; see
@@ -447,7 +460,6 @@ Known limits:
   the next section. Control per account in pinned chats is planned for 1.5.
 - The usage bar for a pinned chat comes from the account's own card.
 - `claude` typed into a plain terminal still uses the switcher's account.
-- Pinning is **Beta**: it works, but expect rough edges.
 
 ### Check everything
 
@@ -473,12 +485,22 @@ pinning login, which Claude Code reads for that account's pinned chats only, so
 `~/.claude/settings.json` isn't touched for them.
 
 Each card also has an **Artifacts** switch. Turning it off stops Claude Code
-from publishing Artifacts while that account is in use. It works through Claude
-Code's own setting, `enableArtifact` in `~/.claude/settings.json`:
+from putting anything on claude.ai while that account is in use: no Artifacts,
+and off also blocks the Claude Docs connector and Claude Code's other tools
+that put things on claude.ai (sharing an onboarding guide, publishing a
+plugin, design sync, creating cloud routines). The cost: with the switch off,
+Claude cannot set up scheduled cloud routines from that account's chats.
+It works through Claude Code's own settings in `~/.claude/settings.json`:
 
-- Switching to an account set to off writes `"enableArtifact": false`;
-  switching to one set to on removes the line again. Pinned chats follow
-  their account's choice, off only, as described above.
+- Switching to an account set to off writes `"enableArtifact": false` and adds
+  these rules to `permissions.deny`: `mcp__claude_ai_Claude_Docs`,
+  `ShareOnboardingGuide`, `PublishPlugin`, `DesignSync` and `RemoteTrigger`.
+  Switching to one set to on removes them again.
+- The switcher adds only the rules that aren't there yet and remembers which
+  ones it added. It removes only those: a rule you wrote yourself stays, and
+  your other permissions are not touched. `permissions` itself is removed only
+  if the switcher created it and nothing else is left in it.
+- Pinned chats follow their account's choice, off only, as described above.
 - The switcher only ever turns Artifacts **off**. "On" means "as Claude Code
   would have it": Artifacts appear only where Anthropic offers them to that
   account, and a managed policy that turns them off still wins.

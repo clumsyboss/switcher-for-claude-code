@@ -264,6 +264,43 @@ async function main() {
   fs.writeFileSync(cfgPath, JSON.stringify(cfg))
   check('an older figure never overwrites a newer one', usage.rememberClaudeCache(ROOT, null) === false)
 
+  console.log('\n-- a chat on another account\'s pinning login writes its figures into .claude.json --')
+  {
+    const kept = fs.readFileSync(cfgPath, 'utf8')
+    const mixed = JSON.parse(kept)
+    mixed.cachedUsageUtilization = { fetchedAtMs: Date.now(), accountUuid: 'uuid-b', utilization: { limits: [{ kind: 'session', percent: 77 }] } }
+    fs.writeFileSync(cfgPath, JSON.stringify(mixed))
+    check('usually the newer of the two readings counts (Claude Code\'s here)', usage.readBest(ROOT, null).session.percent === 77)
+    const beta = tracker.snapshot(ROOT, { skipClaudeCache: true }).find((x) => x.name === 'beta')
+    check('while such a chat runs, the active account\'s row uses the switcher\'s own reading, not that one', beta && beta.session && beta.session.percent === 33,
+      JSON.stringify(beta && beta.session))
+    check('and the usage meter too', usage.readBest(ROOT, null, { skipClaude: true }).session.percent === 33)
+    check('a switch then doesn\'t keep those figures as the leaving account\'s', usage.rememberClaudeCache(ROOT, null, { skipClaude: true }) === false &&
+      usage.readCacheForKey(ROOT, 'uuid-b').session.percent === 33)
+    check('a fresh own reading isn\'t marked old', !usage.readBest(ROOT, null, { skipClaude: true }).stale && !beta.stale)
+    const later = Date.now() + usage.OWN_FRESH_MS + 60000
+    const oldOwn = usage.readBest(ROOT, null, { skipClaude: true, now: later })
+    check('an own reading older than 10 minutes is marked old (its figures, never Claude Code\'s)', oldOwn && oldOwn.stale === true && oldOwn.session.percent === 33)
+    const oldRow = tracker.snapshot(ROOT, { skipClaudeCache: true, now: later }).find((x) => x.name === 'beta')
+    check('and so is the active account\'s row', oldRow && oldRow.stale === true)
+    const auto = require('../lib/autocontinue')
+    check('the early switch doesn\'t act on it', auto.earlyTrigger({ ...oldRow, session: { percent: 99 } }, 80) === null &&
+      auto.earlyTrigger({ ...oldRow, stale: false, session: { percent: 99 } }, 80) === 'session')
+    const soon = new Date(Date.now() + 3600e3).toISOString()
+    const full = { ...oldRow, session: { percent: 95, resetsAt: soon } }
+    const stop = { kind: 'session', at: Date.now(), text: 'x' }
+    check('auto-continue counts it as unknown: no room, no time it has room again, the notice\'s reset time',
+      auto.hasRoom({ ...oldRow, session: { percent: 1 } }, 'session') === false && auto.pickAccount([{ ...oldRow, session: { percent: 1 } }], { kind: 'session' }) === null &&
+      auto.availableAt(full, 'session', Date.now()) === null && auto.resetFor(stop, full) !== Date.parse(soon) &&
+      auto.resetFor(stop, { ...full, stale: false }) === Date.parse(soon))
+    check('without the flag, an old own reading is as before (the newer of the two)', !usage.readBest(ROOT, null, { now: later }).stale)
+    fs.rmSync(usage.cachePathForKey(ROOT, 'uuid-b'))
+    check('with no reading of its own, no figures at all ("--"), never Claude Code\'s as the active account\'s', usage.readBest(ROOT, null, { skipClaude: true }) === null)
+    check('and the row has none', (() => { const r = tracker.snapshot(ROOT, { skipClaudeCache: true }).find((x) => x.name === 'beta'); return r && r.session === null && r.weekly === null && !r.stale })())
+    fs.writeFileSync(cfgPath, kept)
+    usage.rememberClaudeCache(ROOT, null)
+  }
+
   console.log('\n-- a whole round --')
   profiles.writeMeta(ROOT, 'alpha', { ...meta('alpha'), needsLogin: undefined })
   const a = profiles.readPayload(ROOT, 'alpha')

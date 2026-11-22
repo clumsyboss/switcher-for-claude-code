@@ -107,6 +107,10 @@ console.log('which account a chat ran on')
   check('a folder pinned to an account owns its chats', ctx.accountOf(chat, { pins: { '/work/site': 'folder-acct' }, liveLog }) === 'folder-acct')
   check('a pinned chat runs on its own account, over its folder\'s and whatever was live (the wrapper\'s order)',
     ctx.accountOf(chat, { pins: { '/work/site': 'folder-acct' }, chatPins: [{ id: 'other', name: 'x' }, { id: 'chat-1', name: 'chat-acct' }], liveLog }) === 'chat-acct')
+  check('a chat still running on a pinning login counts as that account\'s, even once its pin is gone (unpinned, not reopened)',
+    ctx.accountOf(chat, { pins: {}, chatPins: [], liveLog, running: new Map([['chat-1', 'pinning-acct']]) }) === 'pinning-acct')
+  check('and over a pin it hasn\'t restarted on yet', ctx.accountOf(chat, { pins: {}, chatPins: [{ id: 'chat-1', name: 'new-pin' }], liveLog, running: new Map([['chat-1', 'old-login']]) }) === 'old-login')
+  check('another chat\'s running login doesn\'t count', ctx.accountOf(chat, { pins: {}, liveLog, running: new Map([['other', 'pinning-acct']]) }) === 'live-one')
 }
 
 console.log('project folder names (L2)')

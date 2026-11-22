@@ -80,6 +80,30 @@ async function main() {
   res = await switchLib.switchAccount(ROOT, 'acctA', Object.assign({ withoutSaving: true }, OPTS))
   check('unless the caller says so', res.switched && liveToken() === 'TOKEN-A')
 
+  console.log('\n-- a switch made by a caller that doesn\'t pass skipClaudeCache (Claude Hub) --')
+  {
+    const usage = require('../lib/usage')
+    const logins = require('../lib/logins')
+    const withCache = (pct) => {
+      const j = JSON.parse(fs.readFileSync(P.claudeJson, 'utf8'))
+      j.cachedUsageUtilization = { fetchedAtMs: Date.now(), accountUuid: 'uuid-a@example.com', utilization: { limits: [{ kind: 'session', percent: pct }] } }
+      fs.writeFileSync(P.claudeJson, JSON.stringify(j, null, 2))
+    }
+    const keptForA = () => { const c = usage.readCacheForKey(ROOT, 'uuid-a@example.com'); return c && c.session ? c.session.percent : null }
+    const note = path.join(logins.inUseDir(ROOT), process.pid + '.json')
+    fs.mkdirSync(path.dirname(note), { recursive: true })
+    fs.writeFileSync(note, JSON.stringify({ pid: process.pid, name: 'acctB', sessionId: 's-1', startedAt: Date.now() }))
+    withCache(77)
+    const before = keptForA()
+    await switchLib.switchAccount(ROOT, 'acctB', OPTS)
+    check('while a chat runs on another account\'s pinning login, the leaving account doesn\'t keep Claude Code\'s figures', keptForA() === before, String(keptForA()))
+    fs.rmSync(note)
+    await switchLib.switchAccount(ROOT, 'acctA', OPTS)
+    withCache(41)
+    await switchLib.switchAccount(ROOT, 'acctB', OPTS)
+    check('without such a chat they are kept, as before', keptForA() === 41, String(keptForA()))
+  }
+
   fs.rmSync(TMP, { recursive: true, force: true })
   console.log('\n' + pass + ' passed, ' + fail + ' failed')
   if (fail) process.exit(1)

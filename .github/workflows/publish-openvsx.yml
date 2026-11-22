@@ -1,0 +1,34 @@
+name: Publish to Open VSX
+# When a release is published on the public repo, send its attached .vsix to
+# the Open VSX Registry, where Cursor, Windsurf, VSCodium and other editors
+# built on VS Code get their extensions. It is its own workflow, so it never
+# touches the VS Code Marketplace one. Signing in uses the OVSX_PAT secret.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, such as v1.5.0
+        required: true
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'clumsyboss/switcher-for-claude-code'
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download the release's .vsix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.vsix' --dir dist
+      - name: Make sure the publisher name exists on Open VSX
+        run: npx --yes ovsx@1.4.0 create-namespace clumsyboss || echo "The name exists already, or could not be created. The next step will tell."
+      - name: Publish to Open VSX
+        run: npx --yes ovsx@1.4.0 publish --packagePath dist/*.vsix

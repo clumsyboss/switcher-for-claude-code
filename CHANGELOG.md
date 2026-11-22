@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.5.0
+
+- **A list view for many accounts.** One line per account, with a labelled bar for each limit and an **Active** marker. Switch between cards and list on the page's tools line.
+- **Search, filter and sort.** The tools line finds an account by name, email or organisation, filters the list, and sorts it by name, usage, reset time or your own order.
+- **Groups by organisation.** Accounts can be grouped under their organisation; an organisation with a single account goes under **Others**.
+- **Your own order.** Drag accounts into the order you want. The status bar's hover and the account pickers follow it too, and accounts added later go at the end.
+- **The layout follows the page's width,** from a narrow sidebar to a wide tab.
+- **Usage says how old it is,** so a figure from a while ago doesn't pass for a fresh one.
+- **Extra usage** shows how much of the month's extra spending an account has used, and **use-it-or-lose-it** notes say when an account's limit resets with room left that would go to waste. Close a note and it stays closed until there's something new to say.
+- **Near-limit colours.** Bars turn amber close to a limit and red at it.
+- **"Has room again".** When an account you aren't using was at its 5-hour or weekly limit and that limit resets, the Switcher says so once, with **Switch**: on the Accounts page when it is open, otherwise as a VS Code notice in one window. Nothing is said when usage tracking is off.
+- **Unpinning a chat asks first and reopens it,** as pinning does. Before, an open chat kept running on the pinned account's login until you reopened it by hand, while its usage showed under your active account. Now **Unpin and reopen** moves it back at once (a chat that is replying moves when the reply finishes); a tab is only closed when the Switcher is sure it is that chat. While a chat still runs on another account's pinning login, its usage counts on that account's card and for auto-continue, and the active account shows only its own figures, marked **(old)** when the Switcher couldn't read newer ones. The status bar still shows the active account's meter for a chat that was unpinned but hasn't been reopened yet.
+- **Artifacts off now stops all publishing to claude.ai.** Off also blocks the Claude Docs connector and Claude Code's other tools that put things on claude.ai (sharing an onboarding guide, publishing a plugin, design sync, creating cloud routines). It adds deny rules to `~/.claude/settings.json` and later removes only the ones it added, also when the Switcher is uninstalled.
+- **Uninstalling cleans up in other editors too.** Cursor, Windsurf, VSCodium and other editors built on VS Code get their wrapper setting removed as well. With the Switcher in two editors, the shared Claude Code settings are cleaned only when the last copy is uninstalled.
+- **Pinning logins are no longer Beta.** The Beta tag is gone from the page and its dialogs.
+- The **Show plan and organization** setting is gone: the page always shows them.
+
 ## 1.4.2
 
 - **A pinned chat renewing its login no longer loses the account's pinning login.** Every few hours a pinned chat renews its login, which moves the login's end date by a few thousandths of a second. 1.4.0 and 1.4.1 took that for a new sign-in as your active account: the account lost its pinning login, its pinned chats started on the active account, and a warning offered to use the login for the active account or discard it. A renewal is now just a renewal: nothing is asked, and the pinning login keeps its pinned chats and folders going. The same goes for a renewal of your main login, and of a login that is waiting for your answer.

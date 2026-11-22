@@ -17,12 +17,14 @@ const trackerLib = require('./lib/tracker')
 const locksLib = require('./lib/locks')
 const windowsLib = require('./lib/windows')
 const editionLib = require('./lib/edition')
+const editorsLib = require('./lib/editors')
 const moveLib = require('./lib/movefile')
 const transferLib = require('./lib/transfer')
 const autoLib = require('./lib/autocontinue')
 const kickoffLib = require('./lib/kickoff')
 const switchLib = require('./lib/switch')
 const preferencesLib = require('./lib/preferences')
+const artifactsLib = require('./lib/artifacts')
 const contextLib = require('./lib/context')
 const pageLib = require('./ui/page')
 const welcomeLib = require('./lib/welcome')
@@ -30,6 +32,8 @@ const chatPins = require('./lib/chatpins')
 const loginsLib = require('./lib/logins')
 const signinLib = require('./lib/signin')
 const healthLib = require('./lib/health')
+const requestsLib = require('./lib/requests')
+const cardsLib = require('./lib/cards')
 
 const DEFAULT_NAME = store.DEFAULT_NAME
 const VIEW_ID = 'claudeswitcher.accountsView'
@@ -57,6 +61,8 @@ function labelOf(name) { return (name && store.displayOf(root(), name).label) ||
 function byLabel(a, b) {
   return String(labelOf(a.name)).localeCompare(String(labelOf(b.name)), undefined, { numeric: true, sensitivity: 'base' })
 }
+
+function inOrder(list) { return cardsLib.ordered(list, prefOf('accountOrder'), byLabel) }
 
 function windowPinnedDir() {
   const v = process.env.CLAUDE_CONFIG_DIR
@@ -107,6 +113,21 @@ function repin() {
   if (pinState) log('folder pin: ' + JSON.stringify({ source: pinState.source, name: pinState.name, ready: pinState.ready }))
   syncPins().catch((e) => log('pins: ' + (e && e.message)))
   refreshAll()
+}
+
+function runningOn() {
+  const out = new Map()
+  try { for (const u of loginsLib.listInUse(root())) if (u.sessionId && u.name) out.set(u.sessionId, u.name) } catch {  }
+  return out
+}
+
+function claudeCacheMixed() {
+  const active = profilesLib.activeProfile(root())
+  try { return loginsLib.listInUse(root()).some((u) => u.name && u.name !== active) } catch { return false }
+}
+
+function accountCtx() {
+  return { pins: store.getPins(root()), chatPins: chatPins.read(root()), liveLog: store.getLiveLog(root()), running: runningOn() }
 }
 
 function currentAccount() {
@@ -260,10 +281,10 @@ function updateUsageBar() {
   if (!usageBar) return
   if (!prefOf('statusUsage')) { usageBar.hide(); return }
   const cur = currentAccount()
-  const usage = cur.byKey ? usageOfAccount(cur.name) : usageLib.readBest(root(), cur.dir)
+  const usage = cur.byKey ? usageOfAccount(cur.name) : usageLib.readBest(root(), cur.dir, { skipClaude: !cur.dir && claudeCacheMixed() })
   const text = usageShort(usage)
   const top = text ? usageLib.peak(usage) : 0
-  usageBar.text = updatingAll ? '$(sync~spin) Updating…' : store.iconText(usageIcon()) + ' ' + (text || '--')
+  usageBar.text = updatingAll ? '$(sync~spin) Updating…' : store.iconText(usageIcon()) + ' ' + (text ? text + (usage.stale ? ' (old)' : '') : '--')
   usageBar.backgroundColor = top >= 95
     ? new vscode.ThemeColor('statusBarItem.errorBackground')
     : top >= 80 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined
@@ -353,7 +374,7 @@ function contextTooltip(cur, chats) {
 
 function contextByAccount() {
   if (!editionLib.hasFeature(edition, 'context')) return {}
-  const ctx = { pins: store.getPins(root()), chatPins: chatPins.read(root()), liveLog: store.getLiveLog(root()) }
+  const ctx = accountCtx()
   const out = {}
   for (const c of contextCache.chats) {
     const name = contextLib.accountOf(c, ctx)
@@ -372,7 +393,6 @@ function orgOf(name) {
 const PREFS = {
   tint: { key: 'cards.tint', def: true },
   context: { key: 'cards.context', def: false },
-  plan: { key: 'cards.plan', def: true },
   cardToggles: { key: 'cards.toggles', def: true },
   statusUsage: { key: 'statusBar.usage', def: true },
   statusLoginDays: { key: 'statusBar.loginDays', def: true },
@@ -382,12 +402,19 @@ const PREFS = {
   askSecondLogin: { state: 'claudeswitcher.askSecondLogin', def: true },
   compact: { state: 'claudeswitcher.compactView', def: false },
   validity: { state: 'claudeswitcher.validityStroke', def: true },
+  listView: { state: 'claudeswitcher.listView', def: false },
+  groupByOrg: { state: 'claudeswitcher.groupByOrg', def: false },
+  accountOrder: { state: 'claudeswitcher.accountOrder', def: [], clean: (v) => cardsLib.cleanOrder(v, accountNames()) },
+  dismissedNotes: { state: 'claudeswitcher.dismissedNotes', def: {}, clean: (v) => cardsLib.cleanNotes(v, accountNames()) },
 }
+
+function accountNames() { try { return profilesLib.list(root()).map((p) => p.name) } catch { return [] } }
 
 function prefOf(name) {
   const p = PREFS[name]
   if (p.state) {
     const v = extContext && extContext.globalState ? extContext.globalState.get(p.state) : undefined
+    if (p.clean) { const c = v === undefined ? null : p.clean(v); return c === null ? p.def : c }
     return typeof v === 'boolean' ? v : p.def
   }
   const v = vscode.workspace.getConfiguration('claudeswitcher').get(p.key)
@@ -404,7 +431,12 @@ function allPrefs() {
 function setPref(name, value) {
   const p = Object.prototype.hasOwnProperty.call(PREFS, name) ? PREFS[name] : null
   if (!p) return Promise.resolve()
-  if (p.values ? !p.values.includes(value) : typeof value !== 'boolean') return Promise.resolve()
+  if (p.clean) {
+    if (!accountNames().length) return Promise.resolve()
+    const c = p.clean(value)
+    if (c === null) return Promise.resolve()
+    value = c
+  } else if (p.values ? !p.values.includes(value) : typeof value !== 'boolean') return Promise.resolve()
   if (p.state) return extContext && extContext.globalState ? Promise.resolve(extContext.globalState.update(p.state, value)) : Promise.resolve()
   return vscode.workspace.getConfiguration('claudeswitcher').update(p.key, value, vscode.ConfigurationTarget.Global)
 }
@@ -449,18 +481,27 @@ function useCell(l, withTime) {
 function usageOfAccount(name) {
   const r = snapshotRows().find((x) => x.name === name)
   if (!r) return null
-  return { session: r.session || null, weekly: r.weekly || null, scoped: r.scoped ? [r.scoped] : [], fetchedAtMs: r.fetchedAtMs || null }
+  return { session: r.session || null, weekly: r.weekly || null, scoped: r.scoped ? [r.scoped] : [], fetchedAtMs: r.fetchedAtMs || null, stale: !!r.stale }
 }
 
 function snapshotRows() {
-  try { return trackingEnabled() ? trackerLib.snapshot(root()) : [] } catch (e) {
+  try { return trackingEnabled() ? trackerLib.snapshot(root(), { skipClaudeCache: claudeCacheMixed() }) : [] } catch (e) {
     log('tracker snapshot: ' + e.message)
     return []
   }
 }
 
+function staleLine(cur, usage) {
+  const who = mdEscape(labelOf(cur.name) || 'This account')
+  const why = 'a chat runs on another account\'s pinning login, so Claude Code\'s own figures can\'t be told apart, and the Switcher hasn\'t read newer ones ' +
+    '(usage tracking is off, or Anthropic asked it to wait).'
+  if (usage && usage.stale && usage.fetchedAtMs) return '_' + who + '\'s figures are from ' + clockText(usage.fetchedAtMs) + ': ' + why + '_'
+  if (!usage && !cur.dir && !cur.byKey && claudeCacheMixed()) return '_No current figures for ' + who + ': ' + why + '_'
+  return null
+}
+
 function usageTooltip(cur, usage) {
-  let rows = snapshotRows().sort((a, b) => (b.active - a.active) || byLabel(a, b))
+  let rows = inOrder(snapshotRows()).sort((a, b) => b.active - a.active)
   if (!rows.length) {
     const now = Date.now()
     const top = usage && usage.scoped && usage.scoped[0]
@@ -499,6 +540,7 @@ function usageTooltip(cur, usage) {
   const extra = usageLib.extraText(usage)
   return trustedTip([
     table.join('\n'),
+    staleLine(cur, usage),
     extra ? 'Extra usage for ' + mdEscape(labelOf(cur.name) || 'this account') + ': ' + extra + ' this month.' : null,
     'Click to update every account.  \nClick a name to switch to that account globally.  \n_(pinned folders are unaffected)_',
   ], ['claudeswitcher.switchTo', 'claudeswitcher.startSession'])
@@ -582,6 +624,12 @@ function chatIsHere(chat) {
 }
 
 function chatPin(chat) {
+  const running = runningOn().get(chat.id)
+  if (running) return running
+  return pinnedTo(chat)
+}
+
+function pinnedTo(chat) {
   const own = chatPins.read(root()).find((p) => p.id === chat.id)
   if (own) return own.name
   for (const [folder, name] of Object.entries(store.getPins(root()))) {
@@ -595,6 +643,61 @@ function openChat(sessionId, prompt) {
     log('open chat: ' + (e && e.message))
     notify('warn', "Couldn't open the chat in Claude Code. Open it yourself and type \"continue\".")
   })
+}
+
+const ROOM_SEEN_KEY = 'claudeswitcher.roomBackSeen'
+const roomWaiting = {}
+const roomPolled = new Set()
+let roomChecking = false
+const ROOM_READ_AFTER_MS = 60 * 1000
+
+const roomTold = new Set()
+
+function pageOnScreen() { return !!(noticesInPage && ((panel && panel.visible) || (view && view.visible))) }
+
+async function roomBackCheck() {
+  if (roomChecking) return
+  if (!trackingEnabled()) { for (const k of Object.keys(roomWaiting)) delete roomWaiting[k]; return }
+  roomChecking = true
+  try {
+    const gs = extContext && extContext.globalState
+    const seenNow = () => { const v = gs && gs.get(ROOM_SEEN_KEY); return v && typeof v === 'object' ? v : {} }
+    const seenFor = () => (pageOnScreen() ? {} : seenNow())
+    let res = cardsLib.roomBack(snapshotRows(), roomWaiting, seenFor(), Date.now())
+    let read = false
+    for (const name of res.due) {
+      const until = roomWaiting[name]
+      const k = name + ':' + until
+      if (!until || roomPolled.has(k) || Date.now() < until + ROOM_READ_AFTER_MS || trackerRunning) continue
+      roomPolled.add(k)
+      try {
+        const r = await trackerLib.poll(root(), name, { force: true })
+        if (r && r.polled) read = true
+      } catch (e) { log('room again: read ' + name + ': ' + (e && e.message)) }
+    }
+    if (read) { res = cardsLib.roomBack(snapshotRows(), roomWaiting, seenFor(), Date.now()); refreshAll() }
+    const inPage = pageOnScreen()
+    const fire = res.fire.filter((f) => !roomTold.has(f.name + ':' + f.until))
+    const canTell = inPage || (panel && panel.visible) || (view && view.visible) || (vscode.window.state && vscode.window.state.focused)
+    if (!fire.length || !canTell) return
+    const active = profilesLib.activeProfile(root())
+    const seen = Object.assign({}, seenNow())
+    const names = new Set(accountNames())
+    for (const k of Object.keys(seen)) if (!names.has(k)) delete seen[k]
+    const tell = fire.filter((f) => f.name !== active && names.has(f.name) && (inPage || seen[f.name] !== f.until))
+    for (const f of fire) { seen[f.name] = f.until; roomTold.add(f.name + ':' + f.until) }
+    if (gs) await gs.update(ROOM_SEEN_KEY, seen)
+    for (const f of tell) {
+      log('room again: ' + f.name)
+      notify('info', labelOf(f.name) + ' has room again', 'Switch').then(async (v) => {
+        if (v === 'Switch' && await confirmOrgSwitch(f.name)) await switchTo(f.name)
+      }, () => {})
+    }
+  } catch (e) {
+    log('room again: ' + (e && e.message))
+  } finally {
+    roomChecking = false
+  }
 }
 
 async function checkLimits() {
@@ -632,12 +735,13 @@ async function checkLimits() {
 }
 
 function handleStop(chat, stop, info, settings) {
-  const account = contextLib.accountOf(chat, { pins: store.getPins(root()), chatPins: chatPins.read(root()), liveLog: store.getLiveLog(root()) })
+  const account = contextLib.accountOf(chat, accountCtx())
   const rows = snapshotRows()
   const pinned = chatPin(chat)
   const resetAt = autoLib.resetFor(stop, rows.find((r) => r.name === (pinned || account)))
   const entry = { id: stop.id, chat: chat.id, file: chat.file, name: info.name, title: chat.title, account: pinned || account,
-    kind: stop.kind, resetAt, pinned: !!pinned, permissionMode: stop.permissionMode || null, state: 'new' }
+    kind: stop.kind, resetAt, pinned: !!pinned,
+    stillRunning: !!pinned && pinnedTo(chat) !== pinned, permissionMode: stop.permissionMode || null, state: 'new' }
   if (!autoLib.claim(root(), entry)) return
   log('auto-continue: "' + chat.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] + (entry.account ? ' on "' + entry.account + '"' : ''))
   const canWait = !!resetAt && resetAt - Date.now() <= autoLib.MAX_WAIT_MS
@@ -664,7 +768,8 @@ function askAbout(entry, to, canWait) {
   const SWITCH = to ? 'Switch to ' + labelOf(to) + ' and Continue' : null
   const WAIT = canWait ? 'Continue at ' + clockText(entry.resetAt) : null
   const what = '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + (entry.account ? ' on ' + labelOf(entry.account) : '') +
-    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? ' It\'s pinned to ' + labelOf(entry.account) + ', so it stays on that account.' : '')
+    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? (entry.stillRunning ? ' It still runs on ' + labelOf(entry.account) + '\'s pinning login until it\'s reopened, so it stays on that account.'
+      : ' It\'s pinned to ' + labelOf(entry.account) + ', so it stays on that account.') : '')
   notify('info', what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
     if (pick && pick === SWITCH) switchAndContinue(entry, to)
     else if (pick && pick === WAIT) waitForReset(entry, 'It')
@@ -826,6 +931,7 @@ async function keepAliveTick() {
 }
 
 const LIVE_EVERY_MS = 2 * 60 * 1000
+const LIVE_MIXED_EVERY_MS = 5 * 60 * 1000
 let liveUsageRun = null
 let livePolling = false
 async function pollLiveUsage() {
@@ -835,9 +941,10 @@ async function pollLiveUsage() {
     const key = usageLib.accountKey(null)
     const fresh = () => {
       const ours = usageLib.readLiveCache(root(), null)
-      const claudes = usageLib.readUsage(null)
+      const mixed = claudeCacheMixed()
+      const claudes = mixed ? null : usageLib.readUsage(null)
       const newest = Math.max((ours && ours.fetchedAtMs) || 0, (claudes && claudes.fetchedAtMs) || 0)
-      return Date.now() - newest < LIVE_EVERY_MS - 5000
+      return Date.now() - newest < (mixed ? LIVE_MIXED_EVERY_MS : LIVE_EVERY_MS) - 5000
     }
     if (usageLib.pausedUntil(root(), key) > Date.now() || fresh()) return
     const release = locksLib.tryAcquire(root(), 'live-usage', 30000)
@@ -1287,7 +1394,7 @@ function globalItems() {
     if (r.noSession) return 'weekly ' + useCell(r.weekly, false) + (r.scoped ? ' · ' + r.scoped.model + ' ' + useCell(r.scoped, false) : '')
     return '5h ' + useCell(r.session, false) + ' · weekly ' + useCell(r.weekly, false)
   }
-  return profilesLib.list(root()).sort(byLabel).map((p) => ({
+  return inOrder(profilesLib.list(root())).map((p) => ({
     label: (p.name === active ? '$(check) ' : '$(blank) ') + labelOf(p.name),
     description: [figures(p.name), p.email, p.org].filter(Boolean).join('  ·  '),
     name: p.name,
@@ -1314,6 +1421,8 @@ async function forgetAccount(nameArg) {
     { modal: true }, 'Forget')
   if (confirm !== 'Forget') return
   profilesLib.remove(root(), name)
+  setPref('accountOrder', prefOf('accountOrder')).then(() => {}, () => {})
+  setPref('dismissedNotes', prefOf('dismissedNotes')).then(() => {}, () => {})
   try {
     chatPins.forget(root(), name)
     for (const [folder, n] of Object.entries(store.getPins(root()))) if (n === name) store.setPin(root(), folder, null)
@@ -1351,7 +1460,7 @@ function setArtifactsFor(name, on) {
   writePinnedSettings(name)
   refreshAll()
   notify('info', 'Artifacts are ' + (on ? 'on' : 'off') + ' for "' + labelOf(name) + '"' +
-    (on ? ' where Anthropic offers them' : '') +
+    (on ? ' where Anthropic offers them' : ', with Claude Docs and the other tools that publish to claude.ai') +
     (applied ? '. New chats follow it; restart a running chat to be sure it does.' : '.'))
 }
 
@@ -1372,7 +1481,10 @@ function writePinnedSettings(name) {
   const file = pinnedSettingsFile(name)
   const out = {}
   if (store.getRemote(root(), name) === 'off') out.disableRemoteControl = true
-  if (editionLib.hasFeature(edition, 'artifacts') && store.getArtifacts(root(), name) === 'off') out.enableArtifact = false
+  if (editionLib.hasFeature(edition, 'artifacts') && store.getArtifacts(root(), name) === 'off') {
+    out.enableArtifact = false
+    out.permissions = { deny: [...artifactsLib.DENY] }
+  }
   try {
     if (!Object.keys(out).length || !profilesLib.exists(root(), name)) { fs.rmSync(file, { force: true }); return }
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
@@ -1466,7 +1578,7 @@ async function doSwitch(name, opts) {
 
   let applied
   try {
-    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, withoutSaving: true })
+    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, withoutSaving: true, skipClaudeCache: claudeCacheMixed() })
     if (!res.switched) {
       notify('info', 'Already signed in as "' + labelOf(pick.name) + '".')
       return
@@ -1512,7 +1624,7 @@ async function doSwitch(name, opts) {
 }
 
 function accountItems(current) {
-  return profilesLib.list(root()).sort(byLabel).map((p) => ({
+  return inOrder(profilesLib.list(root())).map((p) => ({
     label: (p.name === current ? '$(pin) ' : '$(blank) ') + labelOf(p.name),
     description: [p.email, pinningReady(p.name) ? 'pinning login: ' + daysPhrase(pinningOf(p.name).expiresAt) + ' left' : 'needs a pinning login (one more sign-in)']
       .filter(Boolean).join('  ·  '),
@@ -1674,7 +1786,7 @@ async function signIn(purpose, name) {
   const email = name ? (profilesLib.readMeta(root(), name) || {}).email || null : null
   let spec = {
     kind: 'signin', title: 'Finish signing in on the browser', url: '', email, stage: 'waiting', error: null,
-    beta: purpose === 'pinning', confirmLabel: purpose === 'relogin' ? 'Sign in' : 'Add account',
+    confirmLabel: purpose === 'relogin' ? 'Sign in' : 'Add account',
     message: purpose === 'pinning' ? 'Your browser opened the Claude sign-in page, to sign ' + label + ' in once more for pinning.'
       : purpose === 'relogin' ? 'Your browser opened the Claude sign-in page, to sign ' + label + ' in again.'
         : 'Your browser opened the Claude sign-in page. Sign in there and this finishes by itself.',
@@ -1780,7 +1892,7 @@ async function addedNew(name) {
       ['Days left', daysPhrase(mainEndOf(name))]],
     sections: offer ? [{ title: 'Add a second login?', text: 'Switcher supports pinning individual chats and folders to specific accounts but this feature requires another login.' }] : [],
     check: offer ? { label: 'Don\'t ask again', checked: false } : null,
-    buttons: offer ? ['No thank you', 'Add account for pinning'] : ['Done'], betaButtons: ['Add account for pinning'], cancel: false })
+    buttons: offer ? ['No thank you', 'Add account for pinning'] : ['Done'], cancel: false })
   if (v && v.checked === true) await setPref('askSecondLogin', false)
   if (v && v.value === 'Add account for pinning') return addPinning(name)
 }
@@ -1818,7 +1930,7 @@ async function alreadySaved(name, s, o) {
   afterLoginChange()
   const pinOk = pinningReady(name)
   const v = await ui.ask({ kind: 'confirm', art: moved ? 'pin' : 'success', title, message: (o.intro ? o.intro + ' ' : '') + message, warning,
-    buttons: ['Add another account', pinOk ? 'Done' : 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+    buttons: ['Add another account', pinOk ? 'Done' : 'Add account for pinning'], cancel: false })
   if (!v) return
   if (v.value === 'Add another account') return addAccount()
   if (v.value === 'Add account for pinning') return addPinning(name)
@@ -1851,7 +1963,7 @@ async function addPinning(nameArg, opts) {
     const fresh = r.pinning && r.pinning.expiresAt
     const outlasts = typeof mainEnd === 'number' && mainEnd > Date.now() && fresh > mainEnd
     afterLoginChange()
-    const v = await ui.ask({ kind: 'confirm', art: 'pin', title: 'Account added for pinning!', beta: true,
+    const v = await ui.ask({ kind: 'confirm', art: 'pin', title: 'Account added for pinning!',
       message: 'Congratulations! ' + labelOf(name) + ' can now pin chats and folders. They run on a login of their own, so they never sign out your other chats.',
       check: outlasts ? { label: 'Use this login to keep main login active?', checked: true,
         help: 'Your main login ends in ' + daysPhrase(mainEnd) + '. Ticking this makes the new login your main one (' + daysPhrase(fresh) +
@@ -1881,7 +1993,7 @@ async function addPinning(nameArg, opts) {
   const v = await ui.ask({ kind: 'confirm', art: 'success', title: 'A second account was added',
     message: 'You signed in as ' + s.email + ', which isn\'t ' + labelOf(name) + ' (' + (mine.email || 'its email') + '), so it\'s been added as an account of its own. ' +
       'To add a pinning login for ' + labelOf(name) + ', sign in as ' + (mine.email || 'that account') + ' instead; a private browser window helps.',
-    field: { label: 'Name', value: labelOf(b) }, buttons: ['Done', 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+    field: { label: 'Name', value: labelOf(b) }, buttons: ['Done', 'Add account for pinning'], cancel: false })
   if (v && typeof v.text === 'string' && v.text.trim()) editAccount(b, v.text.trim().slice(0, 40))
   if (v && v.value === 'Add account for pinning') addPinning(b).catch((e) => log('pinning: ' + (e && e.message)))
   return false
@@ -1965,6 +2077,27 @@ function busySessions() {
     if (!j || j.status !== 'busy' || typeof j.sessionId !== 'string') continue
     const pid = Number.isInteger(j.pid) ? j.pid : parseInt(n, 10)
     if (Number.isInteger(pid) && pid > 0 && fsx.pidAlive(pid)) out.add(j.sessionId)
+  }
+  return out
+}
+
+function liveSessions() {
+  const out = new Map()
+  const dir = path.join(windowsLib.claudeDir(), 'sessions')
+  let names = []
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')) } catch { return out }
+  for (const n of names) {
+    const j = fsx.readJsonLoose(path.join(dir, n), null)
+    if (!j || typeof j.sessionId !== 'string') continue
+    const pid = Number.isInteger(j.pid) ? j.pid : parseInt(n, 10)
+    if (!(Number.isInteger(pid) && pid > 0 && fsx.pidAlive(pid))) continue
+    const had = out.get(j.sessionId)
+    if (had && had.status !== 'idle') continue
+    out.set(j.sessionId, {
+      status: typeof j.status === 'string' ? j.status : null,
+      name: typeof j.name === 'string' ? j.name : null,
+      cwd: typeof j.cwd === 'string' ? j.cwd : null,
+    })
   }
   return out
 }
@@ -2134,6 +2267,8 @@ function loginStoreChanged(key, dir) {
 }
 
 async function fastTick() {
+  requestsLib.beat(root(), { version })
+  await requestsTick()
   if (waitingChats.size || takeouts.size) await settleWaitingChats()
   if (Date.now() - lastLoginCheck < LOGIN_CHANGE_MS - 500) return
   lastLoginCheck = Date.now()
@@ -2565,7 +2700,7 @@ async function finishTakeout(name, plan) {
       refreshAll()
       const v = await ui.ask({ kind: 'confirm', art: 'success', title: 'A second account was added',
         message: (who.email || 'It') + ' is an account of its own now. To give ' + label + ' its pinning login back, use Sign in again in its pin panel.',
-        field: { label: 'Name', value: labelOf(nb) }, buttons: ['Done', 'Add account for pinning'], betaButtons: ['Add account for pinning'], cancel: false })
+        field: { label: 'Name', value: labelOf(nb) }, buttons: ['Done', 'Add account for pinning'], cancel: false })
       if (v && typeof v.text === 'string' && v.text.trim()) editAccount(nb, v.text.trim().slice(0, 40))
       if (v && v.value === 'Add account for pinning') addPinning(nb).catch((e) => log('pinning: ' + (e && e.message)))
     }
@@ -2655,25 +2790,53 @@ async function pinChat(preset) {
     if (current) items.push({ label: '$(close) Unpin this chat', description: 'back to the active account', unpin: true })
     pick = await ui.pick(items, { placeHolder: 'Run "' + (c.title || 'this chat') + '" as which account?' })
     if (!pick) return
-    if (pick.unpin) { await unpinChat(c.id); return }
+    if (pick.unpin) { await confirmUnpinChat(c.id); return }
   }
   if (pick.name === current) { notify('info', 'That chat is already pinned to ' + labelOf(current) + '.'); return }
   if (!(await ensurePinning(pick.name))) return
   const name = c.title || 'this chat'
   const label = labelOf(pick.name)
-  const open = chatTabs(c.title).length > 0
+  const fit = phoneReopenable(c.id, c.title)
+  const open = fit === 'ok' || fit === 'busy'
   const ok = await ui.confirm({
     title: 'Pin "' + name + '" to ' + label + '?',
     message: 'It uses ' + label + '\'s pinning login, a separate login that never signs out your other chats. ' +
-      (open ? 'If the chat is replying, it finishes first, then reopens on ' + label + '.' : 'It opens on ' + label + ' the next time you open it.'),
+      (open ? 'If the chat is replying, it finishes first, then reopens on ' + label + '.'
+        : fit === 'unsure' ? unsureLine(c.title, label)
+          : 'It opens on ' + label + ' the next time you open it.'),
     confirmLabel: open ? 'Pin and reopen' : 'Pin',
   })
   if (!ok) return
-  chatPins.set(root(), c.id, pick.name, c.title)
-  if (!(await syncPins())) { chatPins.remove(root(), c.id); await syncPins(); refreshAll(); return }
+  const r = await applyChatPin(c.id, pick.name, c.title, { reopen: fit !== 'closed', safe: true })
+  if (r.state === 'pinned') notify('info', '"' + name + '" is pinned to ' + label + '. It opens on ' + label + ' the next time you open it.')
+  else if (r.state === 'needs-reopen') {
+    notify('info', chatTabs(c.title).length ? pinUnsureText('"' + name + '"', label)
+      : '"' + name + '" is pinned to ' + label + '. It\'s running, but not in a tab here, so it keeps its current login until you reopen it: it moves to ' + label + ' then.')
+  }
+}
+
+function pinUnsureText(chat, label) {
+  return chat + ' is pinned to ' + label + ', but VS Code couldn\'t be sure which open tab is it, so it wasn\'t reopened. ' +
+    'Reopen it by hand: it moves to ' + label + ' then.'
+}
+
+function unsureLine(title, to) {
+  return chatTabs(title).length ? 'VS Code can\'t be sure which open tab is it, so it isn\'t reopened. Reopen it by hand: it runs on ' + to + ' then.'
+    : 'It\'s running, but not in a tab here (another window?), so it keeps its current login until you reopen it: it runs on ' + to + ' then.'
+}
+
+function unpinUnsureText(chat, to) {
+  return chat + ' is unpinned, but VS Code couldn\'t be sure which open tab is it, so it wasn\'t reopened. ' +
+    'Reopen it by hand: it runs on ' + to + ' then.'
+}
+
+async function applyChatPin(id, name, title, o) {
+  const opt = o || {}
+  chatPins.set(root(), id, name, title)
+  if (!(await syncPins())) { chatPins.remove(root(), id); await syncPins(); refreshAll(); return { ok: false, state: 'failed' } }
   refreshAll()
-  if (open) await reopenWhenIdle(c.id, c.title, pick.name)
-  else notify('info', '"' + name + '" is pinned to ' + label + '. It opens on ' + label + ' the next time you open it.')
+  if (opt.reopen) return reopenWhenIdle(id, title, name, opt)
+  return { ok: true, state: 'pinned' }
 }
 
 const waitingChats = new Map()
@@ -2682,17 +2845,24 @@ function chatBusy(id) {
   try { return busySessions().has(id) } catch { return false }
 }
 
-async function reopenWhenIdle(id, title, name) {
+async function reopenWhenIdle(id, title, name, o) {
+  const quiet = !!(o && o.quiet)
+  const safe = !!(o && o.safe)
   const label = labelOf(name)
-  if (chatBusy(id)) {
-    waitingChats.set(id, { name, title })
+  const fit = safe ? phoneReopenable(id, title) : chatBusy(id) ? 'busy' : 'ok'
+  if (fit === 'closed') return { ok: true, state: 'pinned' }
+  if (fit === 'unsure') return { ok: true, state: 'needs-reopen' }
+  if (fit === 'busy') {
+    waitingChats.set(id, { name, title, safe })
     scheduleLoginWatch()
-    notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + '. Claude is still replying, so it moves to ' + label +
+    if (!quiet) notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + '. Claude is still replying, so it moves to ' + label +
       ' when this reply finishes. To move it now, use Reopen now in the Pinned list.')
-    return
+    return { ok: true, state: 'waiting' }
   }
   waitingChats.delete(id)
-  if (await reopenChat(id, title)) notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + ' and reopened on it. It runs on ' + label + '\'s pinning login from now on.')
+  if (!(await reopenChat(id, title))) return { ok: true, state: 'needs-reopen' }
+  if (!quiet) notify('info', '"' + (title || 'The chat') + '" is pinned to ' + label + ' and reopened on it. It runs on ' + label + '\'s pinning login from now on.')
+  return { ok: true, state: 'reopened' }
 }
 
 let settlingChats = false
@@ -2704,10 +2874,12 @@ async function settleWaitingChats() {
 
 async function settleWaitingChatsNow() {
   for (const [id, w] of [...waitingChats]) {
-    if (w.takeout) {
+    if (w.safe) { await settleFromPhone(id, w); continue }
+    if (w.takeout || w.unpinned) {
       if (chatBusy(id)) continue
       waitingChats.delete(id)
-      if (await reopenChat(id, w.title)) notify('info', '"' + (w.title || 'The chat') + '" finished its reply and reopened on the active account.')
+      const to = w.unpinned ? fallbackAccount(id).label : 'the active account'
+      if (await reopenChat(id, w.title)) notify('info', '"' + (w.title || 'The chat') + '" finished its reply and reopened on ' + to + '.')
       continue
     }
     const pin = chatPins.read(root()).find((p) => p.id === id)
@@ -2720,6 +2892,24 @@ async function settleWaitingChatsNow() {
     }
     refreshAll()
   }
+}
+
+async function settleFromPhone(id, w) {
+  const pin = chatPins.read(root()).find((p) => p.id === id)
+  if (!w.unpinned && !pin) { waitingChats.delete(id); return }
+  const title = liveTitle(id, w.title)
+  const fit = phoneReopenable(id, title)
+  if (fit === 'busy') return
+  waitingChats.delete(id)
+  const to = w.unpinned ? fallbackAccount(id).label : labelOf(pin.name)
+  const chat = '"' + (title || 'The chat') + '"'
+  if (fit === 'ok') {
+    if (await reopenChat(id, title)) notify('info', chat + ' finished its reply and reopened on ' + to + '.')
+  } else if (fit === 'unsure') {
+    notify('info', chat + ' finished its reply, but another open chat could be the one in its tab, so it wasn\'t reopened, to be sure the right one ' +
+      'restarts. Close it, then open it again from Claude Code\'s past conversations: it starts on ' + to + ' then.')
+  }
+  refreshAll()
 }
 
 async function reopenNow(id) {
@@ -2738,8 +2928,9 @@ async function movePin(m) {
     chatPins.set(root(), m.id, to, pin.title)
     await syncPins()
     refreshAll()
-    if (chatTabs(pin.title).length) return reopenWhenIdle(m.id, pin.title, to)
-    notify('info', '"' + (pin.title || 'The chat') + '" is pinned to ' + labelOf(to) + ' now.')
+    const r = await reopenWhenIdle(m.id, pin.title, to, { safe: true })
+    if (r.state === 'needs-reopen') notify('info', pinUnsureText('"' + (pin.title || 'The chat') + '"', labelOf(to)))
+    else if (r.state === 'pinned') notify('info', '"' + (pin.title || 'The chat') + '" is pinned to ' + labelOf(to) + ' now.')
   } else if (typeof m.folder === 'string' && store.getPin(root(), m.folder)) {
     store.setPin(root(), m.folder, to)
     repin()
@@ -2747,21 +2938,183 @@ async function movePin(m) {
   }
 }
 
-async function unpinChat(id) {
+async function unpinChat(id, o) {
+  const opt = o || {}
   const pin = chatPins.read(root()).find((p) => p.id === id)
-  if (!pin || !chatPins.remove(root(), id)) return
+  if (!pin || !chatPins.remove(root(), id)) return null
   waitingChats.delete(id)
   await syncPins()
   refreshAll()
-  notify('info', '"' + (pin.title || 'The chat') + '" is unpinned. It uses the active account the next time it opens.')
+  if (!opt.quiet) notify('info', '"' + (pin.title || 'The chat') + '" is unpinned. It runs on ' + fallbackAccount(id).label + ' the next time it opens.')
+  if (!opt.reopen) return { ok: true, state: 'unpinned', reopened: false, waiting: false }
+  const title = liveTitle(id, pin.title)
+  const fit = opt.safe ? phoneReopenable(id, title) : chatBusy(id) ? 'busy' : 'ok'
+  if (fit === 'busy') {
+    waitingChats.set(id, { name: null, title, unpinned: true, safe: !!opt.safe })
+    scheduleLoginWatch()
+    return { ok: true, state: 'unpinned', reopened: false, waiting: true }
+  }
+  if (fit !== 'ok') return { ok: true, state: fit === 'unsure' ? 'needs-reopen' : 'unpinned', reopened: false, waiting: false }
+  const reopened = await reopenChat(id, title, { quiet: !!opt.quiet })
+  return { ok: true, state: reopened ? 'unpinned' : 'needs-reopen', reopened, waiting: false }
 }
 
-async function reopenChat(id, savedTitle) {
+async function confirmUnpinChat(id) {
+  const pin = chatPins.read(root()).find((p) => p.id === id)
+  if (!pin) return
+  const title = liveTitle(id, pin.title)
+  const name = title || 'this chat'
+  const to = fallbackAccount(id).label
+  const fit = phoneReopenable(id, title)
+  const open = fit === 'ok' || fit === 'busy'
+  const ok = await ui.confirm({
+    title: 'Unpin "' + name + '"?',
+    message: 'It goes back to ' + to + '. ' +
+      (open ? 'If the chat is replying, it finishes first, then reopens on ' + to + '.'
+        : fit === 'unsure' ? unsureLine(title, to)
+          : 'It opens on ' + to + ' the next time you open it.'),
+    confirmLabel: open ? 'Unpin and reopen' : 'Unpin',
+  })
+  if (!ok) return
+  const r = await unpinChat(id, { reopen: fit !== 'closed', quiet: true, safe: true })
+  if (!r) return
+  const chat = '"' + (title || 'The chat') + '"'
+  if (r.waiting) {
+    notify('info', chat + ' is unpinned. Claude is still replying, so it reopens on ' + to + ' when this reply finishes. ' +
+      'Reopen now moves it at once, but the reply stops part-way.', 'Reopen now')
+      .then((b) => {
+        const w = waitingChats.get(id)
+        if (b !== 'Reopen now' || !w || !w.unpinned) return
+        waitingChats.delete(id)
+        const now = phoneReopenable(id, liveTitle(id, w.title))
+        if (now !== 'ok' && now !== 'busy') { if (now === 'unsure') notify('info', unpinUnsureText(chat, to)); return }
+        return reopenChat(id, w.title).then((done) => { if (done) notify('info', chat + ' reopened on ' + to + '. The reply it was writing stopped part-way, so ask it to carry on if you need the rest.') })
+      }, () => {})
+  } else if (r.reopened) {
+    notify('info', chat + ' is unpinned and reopened on ' + to + '. It runs on ' + to + ' from now on.')
+  } else if (r.state === 'needs-reopen') {
+    notify('info', chatTabs(title).length ? unpinUnsureText(chat, to)
+      : chat + ' is unpinned. It\'s running, but not in a tab here, so it keeps its current login until you reopen it: it runs on ' + to + ' then.')
+  } else {
+    notify('info', chat + ' is unpinned. It opens on ' + to + ' the next time you open it.')
+  }
+}
+
+function fallbackAccount(id) {
+  let lines = []
+  try { lines = fs.readFileSync(chatPins.wrapperFile(root()), 'utf8').split(/\r?\n/).filter((l) => !l.startsWith('chat\t')) } catch { lines = [] }
+  let name = null
+  try { name = lines.length ? chatPins.pinFor(lines, id, chatCwd(id)) : null } catch { name = null }
+  if (name) return { name, label: labelOf(name), folder: true }
+  const active = store.getActive(root())
+  return { name: active || null, label: active ? labelOf(active) : 'the active account', folder: false }
+}
+
+function chatCwd(id) {
+  const live = liveSessions().get(id)
+  if (live && live.cwd) return live.cwd
+  let fd
+  try {
+    const f = chatPins.chatFile(path.join(windowsLib.claudeDir(), 'projects'), id)
+    if (!f) return null
+    fd = fs.openSync(f, 'r')
+    const buf = Buffer.alloc(64 * 1024)
+    const n = fs.readSync(fd, buf, 0, buf.length, 0)
+    const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(buf.toString('utf8', 0, n))
+    return m ? JSON.parse('"' + m[1] + '"') : null
+  } catch { return null } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {  } }
+}
+
+function phoneReopenable(id, title) {
+  const live = liveSessions()
+  const me = live.get(id)
+  if (!me) return 'closed'
+  const tabs = chatTabs(title)
+  if (tabs.length !== 1) return 'unsure'
+  for (const [sid, s] of live) {
+    if (sid === id) continue
+    const other = liveTitle(sid, s.name)
+    if (other && tabs.some((t) => chatPins.tabMatches(t.label, other))) return 'unsure'
+  }
+  return me.status === 'idle' ? 'ok' : 'busy'
+}
+
+const REQUESTS_PER_TICK = 5
+
+let requestsRunning = false
+async function requestsTick() {
+  if (requestsRunning) return
+  requestsRunning = true
+  try {
+    let done = 0
+    for (const r of requestsLib.pending(root())) {
+      if (done >= REQUESTS_PER_TICK) break
+      const title = requestsLib.validSession(r.sessionId) ? chatTitleOf(r.sessionId) : null
+      const fit = title ? phoneReopenable(r.sessionId, title) : 'closed'
+      const here = fit === 'ok' || fit === 'busy'
+      if (!here && r.ageMs < requestsLib.CLAIM_ANY_MS) continue
+      const req = requestsLib.claim(root(), r.id)
+      if (!req) continue
+      done++
+      try {
+        let res
+        try { res = await handleRequest(req, here) } catch (e) {
+          log('phone request: ' + (e && e.message))
+          res = { ok: false, state: 'failed', text: 'The Switcher couldn\'t do this: ' + ((e && e.message) || e) }
+        }
+        requestsLib.finish(root(), r.id, res)
+      } catch (e) { log('phone request: answering: ' + (e && e.message)) }
+    }
+    requestsLib.sweep(root())
+  } catch (e) { log('phone requests: ' + (e && e.message)) } finally { requestsRunning = false }
+}
+
+async function handleRequest(req, here) {
+  const c = requestsLib.check(root(), req)
+  if (!c.ok) return { ok: false, state: 'failed', text: c.text }
+  const id = req.sessionId
+  const title = chatTitleOf(id)
+  const chat = '"' + (title || 'The chat') + '"'
+  const openElsewhere = !here && liveSessions().has(id)
+  if (req.kind === 'unpinChat') {
+    const r = await unpinChat(id, { reopen: here, quiet: true, safe: true })
+    if (!r) return { ok: true, state: 'unpinned', text: chat + ' wasn\'t pinned.' }
+    const state = openElsewhere ? 'needs-reopen' : r.state
+    const fb = fallbackAccount(id)
+    const to = fb.folder ? fb.label + ' (its folder\'s account)' : fb.label
+    notify('info', 'Unpinned ' + chat + ' from your phone.' + (r.waiting ? ' It moves to ' + fb.label + ' when this reply finishes.' : ''))
+    const text = state === 'needs-reopen' ? unpinUnsureText(chat, to)
+      : r.waiting ? chat + ' is unpinned. It moves to ' + to + ' when its current reply finishes.'
+        : r.reopened ? chat + ' is unpinned and reopened on ' + to + '.'
+          : chat + ' is unpinned. It runs on ' + to + ' the next time it opens.'
+    return { ok: true, state, text }
+  }
+  const name = req.account
+  const label = labelOf(name)
+  const current = chatPins.read(root()).find((p) => p.id === id)
+  if (current && current.name === name && (!here || waitingChats.has(id))) {
+    return waitingChats.has(id) ? { ok: true, state: 'waiting', text: chat + ' is already pinned to ' + label + ' and moves when its current reply finishes.' }
+      : { ok: true, state: 'pinned', text: chat + ' is already pinned to ' + label + '.' }
+  }
+  const r = await applyChatPin(id, name, title, { reopen: here, quiet: true, safe: true })
+  if (!r.ok) return { ok: false, state: 'failed', text: 'Claude Code\'s "Claude Process Wrapper" setting couldn\'t be set (it may be set to another program), so nothing was pinned.' }
+  if (openElsewhere && r.state === 'pinned') r.state = 'needs-reopen'
+  notify('info', 'Pinned ' + chat + ' to ' + label + ' from your phone.' + (r.state === 'waiting' ? ' It moves when this reply finishes.' : ''))
+  const text = {
+    pinned: chat + ' is pinned to ' + label + '. It moves to ' + label + ' the next time it opens.',
+    waiting: chat + ' is pinned to ' + label + '. It moves when its current reply finishes.',
+    reopened: chat + ' is pinned to ' + label + ' and reopened on it.',
+    'needs-reopen': pinUnsureText(chat, label),
+  }[r.state]
+  return { ok: true, state: r.state, text }
+}
+
+async function reopenChat(id, savedTitle, o) {
   const title = liveTitle(id, savedTitle)
   const tabs = chatTabs(title)
   if (tabs.length > 1) {
     log('chat pins: not reopening "' + title + '": ' + tabs.length + ' open chats show that title')
-    notify('info', tabs.length + ' open chats are called "' + title + '", so the one that moved wasn\'t reopened, to be sure the right one ' +
+    if (!(o && o.quiet)) notify('info', tabs.length + ' open chats are called "' + title + '", so the one that moved wasn\'t reopened, to be sure the right one ' +
       'restarts. Close it, then open it again from Claude Code\'s past conversations: it starts on its new account then.')
     return false
   }
@@ -3159,7 +3512,9 @@ async function showStatus() {
     ? (st.loggedIn ? 'signed in' : 'SIGNED OUT') + '  ' +
       [st.email, st.orgName ? '(' + st.orgName + ')' : null].filter(Boolean).join(' ')
     : 'ERROR: ' + st.error))
-  output.appendLine('usage: ' + (usageLib.compactText(usageLib.readBest(root(), null)) || 'n/a'))
+  const liveUsage = usageLib.readBest(root(), null, { skipClaude: claudeCacheMixed() })
+  output.appendLine('usage: ' + (usageLib.compactText(liveUsage) || 'n/a') +
+    (liveUsage && liveUsage.stale && liveUsage.fetchedAtMs ? '  (old: as of ' + new Date(liveUsage.fetchedAtMs).toISOString() + ')' : ''))
   output.appendLine('saved accounts:')
   const saved = profilesLib.list(root())
   if (!saved.length) output.appendLine('   (none saved yet)')
@@ -3321,7 +3676,7 @@ function pageState() {
       pinnedLabel: pinnedHere() ? labelOf(pinState.name) : null,
       needsPinning: !!(pinState && pinState.source === 'pin' && !pinState.ready) ? labelOf(pinState.name) : null,
     },
-    accounts: profilesLib.list(root()).sort(byLabel).map((p) => {
+    accounts: inOrder(profilesLib.list(root())).map((p) => {
       const r = rows.find((x) => x.name === p.name) || {}
       const disp = store.displayOf(root(), p.name)
       const hasWindowDir = windowNames.includes(p.name)
@@ -3349,6 +3704,7 @@ function pageState() {
         scoped: r.scoped || null,
         noSession: !!r.noSession,
         fetchedAtMs: r.fetchedAtMs || null,
+        extra: cardsLib.extraOf(r.extra),
         windowLogin: hasWindowDir ? (() => {
           const st = windowsLib.loginState(root(), p.name)
           return { signedIn: st === 'yes', expired: st === 'expired', email: (wid && wid.email) || null }
@@ -3643,7 +3999,7 @@ const PAGE_ACTIONS = {
   pin: (m) => pinFolder(m.name),
   unpin: (m) => unpinFolder(m.folder),
   pinChat: (m) => pinChat(m.name),
-  unpinChat: (m) => { if (chatPins.validId(m.id)) return unpinChat(m.id) },
+  unpinChat: (m) => { if (chatPins.validId(m.id)) return confirmUnpinChat(m.id) },
   status: () => showStatus(),
   openConfig: () => openConfigFile(),
   openTab: () => openAccountsTab(),
@@ -3745,6 +4101,7 @@ function activate(context) {
   edition = editionLib.from(context)
   version = (context.extension && context.extension.packageJSON && context.extension.packageJSON.version) || null
   extensionPath = (context.extensionPath) || __dirname
+  try { editorsLib.record(root(), editorsLib.userDirOf(context.globalStorageUri && context.globalStorageUri.fsPath), extensionPath) } catch {  }
 
   pinState = null
   applyPin()
@@ -3860,7 +4217,7 @@ function activate(context) {
   usageTimer = setInterval(() => updateUsageBar(), 60000)
   const contextTimer = setInterval(refreshContext, 30000)
   const compactTimer = contextBar ? setInterval(checkCompacting, 1000) : null
-  const limitTimer = setInterval(() => { checkLimits(); keepAliveTick() }, 15000)
+  const limitTimer = setInterval(() => { checkLimits(); keepAliveTick(); roomBackCheck() }, 15000)
   const liveTick = () => { pollLiveUsage().then(earlySwitchCheck, earlySwitchCheck) }
   const liveTimer = setInterval(liveTick, LIVE_EVERY_MS)
   const liveFirst = setTimeout(liveTick, 8000)
@@ -3890,6 +4247,7 @@ function activate(context) {
   try { cleanupSigninDirs() } catch (e) { log('sign-in cleanup: ' + (e && e.message)) }
   startupLogins().then(() => { afterLoginChange(); writePinnedSettingsAll() }, (e) => log('logins: ' + (e && e.message)))
   const loginTimer = loginAuto ? setInterval(() => { loginWatch().catch((e) => log('login watch: ' + (e && e.message))) }, LOGIN_WATCH_MS) : null
+  if (loginAuto) requestsLib.beat(root(), { version })
   const loginChangeTimer = loginAuto ? setInterval(() => { fastTick().catch((e) => log('/login watch: ' + (e && e.message))) }, WAITING_CHECK_MS) : null
   context.subscriptions.push({ dispose: () => {
     clearInterval(loginChangeTimer)
@@ -3918,6 +4276,7 @@ function stopLoginWatchers() {
 
 function deactivate() {
   if (usageTimer) clearInterval(usageTimer)
+  try { requestsLib.unbeat(root()) } catch {  }
   stopLoginWatchers()
   try { signinLib.cancelAll() } catch {  }
 }
@@ -3934,7 +4293,7 @@ module.exports = {
     dropSigninDir,
     setSigninDropRetryMs: (list) => { signinDropRetryMs = list || [6000, 30000] },
     openAsks: () => [...asks].map(([id, a]) => ({ id, spec: a.spec })),
-    loginWatch, checkAll, startupLogins, writePinnedSettings, loginChangeTick, fastTick,
+    loginWatch, checkAll, startupLogins, writePinnedSettings, loginChangeTick, fastTick, requestsTick, phoneReopenable, fallbackAccount,
     loginChangeMs: () => LOGIN_CHANGE_MS,
     setIdentityDelayMs: (ms) => { identityWaitMs = ms },
     takeoutsPending: () => [...takeouts.keys()], syncPins,
@@ -3948,7 +4307,8 @@ module.exports = {
     setKickoffRun: (fn) => { kickoffRun = fn },
     setHandoffRun: (fn) => { handoffRun = fn },
     setKeepAliveRun: (fn) => { keepAliveRun = fn },
-    checkLimits, keepAliveTick, refreshContext,
+    checkLimits, keepAliveTick, refreshContext, roomBackCheck, prefOf, setPref,
+    roomReset: () => { for (const k of Object.keys(roomWaiting)) delete roomWaiting[k]; roomPolled.clear(); roomTold.clear() },
     setLiveUsageRun: (fn) => { liveUsageRun = fn },
     pollLiveUsage, earlySwitchCheck,
     settle: () => Promise.all([...pendingLogins]),

@@ -67,8 +67,8 @@ const durations = (css.match(/[\s,(](\d*\.?\d+)(m?s)\b/g) || [])
   .map((d) => d.trim().replace(/^[,(]/, '')).map((d) => d.endsWith('ms') ? parseFloat(d) : parseFloat(d) * 1000)
 const loopMs = [...css.matchAll(/animation: [\w-]+ (\d*\.?\d+)s [^;]*infinite/g)].map((m) => parseFloat(m[1]) * 1000)
 const longest = Math.max(...durations.filter((ms) => !loopMs.includes(ms)))
-check('every transition and animation is 250ms or less (endless loops like the spinner aside)',
-  longest <= 250, 'longest ' + longest + 'ms')
+check('every transition and animation is 350ms or less (the shared slide is 350ms) (endless loops like the spinner aside)',
+  longest <= 350, 'longest ' + longest + 'ms')
 check('motion is switched off for people who ask for reduced motion', /prefers-reduced-motion: reduce/.test(css))
 
 console.log('\n-- the design rules --')
@@ -81,7 +81,7 @@ for (const [sel, body] of rules) {
   }
 }
 const strokes = borders.filter((b) => !(b.val === '0' || /transparent/.test(b.val) || /var\(--hc-border\)/.test(b.val) ||
-  (b.sel === '.card.live' && /var\(--live-stroke\)/.test(b.val)) ||
+  ((b.sel === '.card.live' || b.sel === '.lrow.live') && /var\(--live-stroke\)/.test(b.val)) ||
   ((b.sel === '.menu hr' || b.sel === '.foot') && /var\(--divider\)/.test(b.val))))
 check('no strokes on anything — only the live account has one', strokes.length === 0,
   strokes.map((b) => b.sel + ' ' + b.prop + ': ' + b.val).join(' | '))
@@ -94,9 +94,9 @@ check('pinned folders: 8px rows, 16px on the top of the first and the bottom of 
   /border-top-left-radius: var\(--radius\);\s*border-top-right-radius: var\(--radius\)/.test(ruleFor('.pin-row:first-child')) &&
   /border-bottom-left-radius: var\(--radius\);\s*border-bottom-right-radius: var\(--radius\)/.test(ruleFor('.pin-row:last-child')))
 check('cards and buttons use those radii', /var\(--radius\)/.test(ruleFor('.card')) && /var\(--radius-sm\)/.test(ruleFor('.btn')))
-check('Update usage and Pin a folder are ghost buttons',
-  /class: 'btn ghost'[^\n]*send\('update'/.test(js) && /class: 'btn ghost sm', onclick: \(\) => send\('pin'\) }, icon\('pin'/.test(js))
-check('no status pills on the cards (the plan badge is the only pill)', !/Most room|'Live'|In use/.test(js) && /class: 'plan-badge'/.test(js))
+check('Update usage is a ghost icon-only button, and the Pin buttons (end of the tools line) say "Pin" then an icon',
+  /class: 'btn ghost icon-only', disabled: updating[^\n]*'data-fk': 'update'/.test(js) && /h\('span', \{ class: 'hp-word', text: 'Pin' \}\), icon\(ic, 'sm'\)/.test(js))
+check('no status pills on the cards (the plan badge is the only pill)', !/text: 'Most room'|'Live'|In use/.test(js) && /class: 'plan-badge'/.test(js))
 check('menus live in a layer of their own, above every card', /document\.body\.append\(layer\)/.test(js) &&
   /\.menu-layer \{ position: fixed;[^}]*z-index: 40/.test(css))
 check('menus are built with h(), which skips empty items, never with a bare append (that printed "null")',
@@ -120,24 +120,21 @@ check('and may shrink to 250px only to keep two abreast (under 608px: two 300px 
   /@container accounts \(width < 608px\) \{\s*\.grid \{ grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 250px\), 1fr\)\); \}/.test(css))
 check('text eases from 12.5px to 11.5px as a card goes from 300px to 250px',
   /\.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 220px\) \/ 50\), var\(--fs-max\)\); \}/.test(css))
-check('a narrow card shortens Remote Control and shows the Switch icon alone, keeping their full names',
-  /@container card \(max-width: 340px\)[^}]*\.has-short \.long \{ display: none; \}[\s\S]*?\.btn-text \{ display: none; \}/.test(css) &&
+check('a card short of room shortens Remote Control first, then shows the Switch icon alone, keeping their full names',
+  /\.card-foot\.foot-short \.toggle \.tl\.has-short \.long \{ display: none; \}/.test(css) && /\.card-foot\.foot-icon \.btn\.switch-btn \.btn-text \{ display: none; \}/.test(css) &&
+  /f\.classList\.add\('foot-short'\)[\s\S]{0,80}f\.classList\.add\('foot-icon'\)/.test(js) &&
   /toggle\('Remote Control', 'Remote'/.test(js) && /'aria-label': \(switching \? 'Switching to ' : 'Switch to '\) \+ a\.label/.test(js))
 check('a label without a short form is never hidden', !/\.toggle \.tl \.long \{ display: none/.test(css))
-check('the head\'s Pin buttons narrow in two steps: "Pin chat" to "Chat", then "Beta" to "B"',
-  /\.accounts > \.section-head \{ container: accounts-head \/ inline-size; \}/.test(css) &&
-  /@container accounts-head \(max-width: 366px\) \{\s*\.head-buttons \.btn > \.hb-long \{ display: none; \}\s*\.head-buttons \.btn > \.hb-short \{ display: inline; \}/.test(css) &&
-  /@container accounts-head \(max-width: 329px\) \{\s*\.head-buttons \.beta > \.hb-long \{ display: none; \}\s*\.head-buttons \.beta > \.hb-short \{ display: inline; \}/.test(css) &&
-  /\.head-buttons \.hb-short \{ display: none; \}/.test(css))
-check('and keep their whole names for screen readers', /'aria-label': long \+ ' \(Beta\)'/.test(js) && /headPinButton\('pinFolder'/.test(js))
+check('the head\'s Pin buttons keep their whole names (tooltip and screen readers), and there is no Beta tag anywhere',
+  /headPinButton\('pinChat', 'Pin a chat to an account', 'chat'/.test(js) && /headPinButton\('pinFolder', 'Pin a folder to an account', 'folder'/.test(js) &&
+  /'aria-label': title/.test(js) && !/betaTag|class: 'beta'/.test(js) && !/\.beta \{/.test(css))
 
 console.log('\n-- the compact view --')
-check('a button left of Pin chat, as tall as the Pin buttons, with aria-pressed',
-  /h\('div', \{ class: 'head-buttons' \},\s*compactButton\(\),\s*headPinButton\('pinChat'/.test(js) &&
-  /return h\('button', \{ class: 'btn tint sm', 'data-fk': key/.test(js) &&
-  /class: 'btn ghost sm icon-only cv-toggle'/.test(js) && /btn\.setAttribute\('aria-pressed', String\(on\)\)/.test(js))
+check('an icon-only button in the tools line, after Search, Filter and Sort and before List or cards (the Pin buttons last), with aria-pressed',
+  /compactButton\(\), viewButton\(\),\s*h\('div', \{ class: 't-pins' \}/.test(js) && /menuBtn\('t-filter'[\s\S]*?icon-only t-sort'/.test(js) &&
+  /class: 'btn soft tool-btn icon-only cv-toggle'/.test(js) && /btn\.setAttribute\('aria-pressed', String\(on\)\)/.test(js))
 check('its tooltip says what pressing it does, with the matching drawing; its name stays "Compact view" (pressed when on)',
-  /const what = on \? 'Expanded view' : 'Compact view'/.test(js) && /btn\.title = what/.test(js) &&
+  /const what = on \? 'Comfortable view' : 'Compact view'/.test(js) && /btn\.title = what/.test(js) &&
   /btn\.setAttribute\('aria-label', 'Compact view'\)/.test(js) && !/setAttribute\('aria-label', what\)/.test(js) &&
   /icon\(on \? 'unfold' : 'fold', 'sm'\)/.test(js) &&
   /\n    fold: '<path/.test(js) && /\n    unfold: '<path/.test(js))
@@ -145,7 +142,7 @@ check('off by default, and saved as a page setting', /askSecondLogin: true, comp
   /send\('setting', \{ key: 'compact', value: on \}\)/.test(js))
 check('reduced motion (the system\'s or VS Code\'s) changes the view at once',
   /matchMedia\('\(prefers-reduced-motion: reduce\)'\)\.matches/.test(js) && /vscode-reduce-motion/.test(js) &&
-  /if \(!reducedMotion\(\)\) \{ cvStart\(on\); return \}/.test(js))
+  /if \(!reducedMotion\(\) && pref\('listView'\) !== true\) \{ cvStart\(on\); return \}/.test(js))
 check('a redraw waits for the change, and otherwise shows the saved view without animating',
   /if \(cvAnim\) \{ cvPending = true; return \}\n    docEl\.classList\.toggle\('compact-view', compactWanted\(\)\)/.test(js))
 const cvTime = Number((js.match(/const CV_TIME = (\d+)/) || [])[1])
@@ -153,22 +150,22 @@ check('the change lasts 300-350ms: contents out over 100ms, in over 200ms',
   /const CV_OUT = 100\n/.test(js) && /const CV_IN = 200\n/.test(js) && cvTime >= 300 && cvTime <= 350, cvTime)
 check('compact keeps text the same size (the font rule moves by the room the padding gives back: 13px, 12px in the sidebar)',
   /html\.compact-view \.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 233px\) \/ 50\), var\(--fs-max\)\); \}/.test(css) &&
-  /html\.compact-view body\.layout-sidebar \.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 232px\) \/ 50\), var\(--fs-max\)\); \}/.test(css) &&
+  /html\.compact-view body\.narrow \.card > \* \{ font-size: clamp\(11\.5px, calc\(11\.5px \+ \(100cqi - 232px\) \/ 50\), var\(--fs-max\)\); \}/.test(css) &&
   2 * (px(ruleFor('.card'), 'padding') - px(ruleFor('html.compact-view .card'), 'padding')) === 13 &&
-  2 * (px(ruleFor('body.layout-sidebar .card'), 'padding') - px(ruleFor('html.compact-view body.layout-sidebar .card'), 'padding')) === 12)
+  2 * (px(ruleFor('body.narrow .card'), 'padding') - px(ruleFor('html.compact-view body.narrow .card'), 'padding')) === 12)
 check('rows keep equal room on every side', /html\.compact-view \{ --cvo: 1; --row-pad: 4\.5px; \}/.test(css) &&
   /html\.compact-view \.ac-steps \{ padding: var\(--row-pad\); \}/.test(css))
 check('compact: one line at the top (the picture is the pin button\'s 28px, no email line), and the email in the name\'s tooltip',
-  /html\.compact-view \.card-head \.avatar, html\.compact-view body\.layout-sidebar \.card-head \.avatar \{ width: 28px; height: 28px; \}/.test(css) &&
+  /html\.compact-view \.card-head \.avatar, html\.compact-view body\.narrow \.card-head \.avatar \{ width: 28px; height: 28px; \}/.test(css) &&
   /html\.compact-view \.card-head \.ident \.sub \{ display: none; \}/.test(css) &&
   /h\('div', \{ class: 'name', text: a\.label, 'data-who': who \|\| null, title: \[who, days\]/.test(js) &&
   /nm\.title = \[nm\.dataset\.who \|\| '', days \|\| ''\]/.test(js))
 check('compact: label, bar and reset line half as far apart, the same either side of the bar; the toggles closer',
-  /html\.compact-view \.track \{ margin: -0\.9px 0 -0\.1px; \}/.test(css) && /html\.compact-view body\.layout-sidebar \.track \{ margin: -0\.5px 0 -0\.5px; \}/.test(css) &&
+  /html\.compact-view \.track \{ margin: -0\.9px 0 -0\.1px; \}/.test(css) && /html\.compact-view body\.narrow \.track \{ margin: -0\.5px 0 -0\.5px; \}/.test(css) &&
   /html\.compact-view \.card \.meters:has\(\+ \.card-foot\) \{ margin-bottom: -4px; \}/.test(css))
 check('a narrow card keeps its Switch button on the toggles\' line (the footer\'s rules outweigh the sidebar\'s)',
-  /@container card \(max-width: 300px\) \{\s*\.card-foot, html body\.layout-sidebar \.card-foot \{ column-gap: 8px; \}/.test(css) &&
-  /\.card-foot, html body\.layout-sidebar \.card-foot \{ gap: 6px 8px; \}/.test(css))
+  /@container card \(max-width: 300px\) \{\s*\.card-foot, html body\.narrow \.card-foot \{ column-gap: 8px; \}/.test(css) &&
+  /\.card-foot, html body\.narrow \.card-foot \{ gap: 6px 8px; \}/.test(css))
 
 console.log('\n-- colours and avatars --')
 const clientColors = Object.keys(eval('(' + (js.match(/const COLORS = (\{[\s\S]*?\n  \})/) || [])[1] + ')'))

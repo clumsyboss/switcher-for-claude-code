@@ -9,6 +9,24 @@ if (!process.env.FAKE_HOME_DIR) {
   process.env.USERPROFILE = process.env.FAKE_HOME_DIR
 }
 
+function guardIsLive(v) {
+  const pid = Number(v)
+  if (!/^[0-9]+$/.test(String(v || '')) || pid <= 0) return false
+  if (pid === process.pid || pid === process.ppid) return true
+  try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' }
+}
+if (!guardIsLive(process.env.SWITCHER_TEST_GUARDED)) {
+  process.env.SWITCHER_TEST_GUARDED = String(process.pid)
+  for (const k of ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'CLAUDESWITCHER_SECURESTORAGE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR']) delete process.env[k]
+
+  const live = path.resolve(require('../lib/credstore').filePath(null))
+  const tmp = path.resolve(os.tmpdir())
+  if (process.platform !== 'darwin' && !live.toLowerCase().startsWith(tmp.toLowerCase() + path.sep)) {
+    console.error('tests: the live login would be ' + live + ', outside the temp folder; stopping so no real login is touched')
+    process.exit(1)
+  }
+}
+
 if (!process.env.FAKE_KEYCHAIN_FILE) {
   process.env.FAKE_KEYCHAIN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fake-keychain-')), 'items.json')
   process.env.NODE_OPTIONS = ((process.env.NODE_OPTIONS || '') + ' --require ' + JSON.stringify(__filename)).trim()
