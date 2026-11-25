@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.2
+
+- **Auto-continue no longer acts on its own on a chat that stopped a while ago.** Only a chat it finds stopped within 10 minutes is switched for or continued without asking. A chat that has been stopped longer, found when you turn auto-continue on or change its settings, open a window or wake the PC, is asked about once, saying since when it has been stopped; when its limit has already reset, the offer is **Continue Here**, on the account it is on, not a switch. Before, two chats stopped hours earlier could be switched for and continued as soon as the settings changed.
+- **The 5-hour limit is called the 5-hour limit.** Claude Code's notice "You've hit your 5-hour limit" was read as a model's weekly limit, so auto-continue said "weekly model limit" and could take the wrong reset time.
+- **A wait to continue on another account no longer switches for nothing.** When its time comes, a chat that has carried on since (you continued it yourself, for example) is left alone, with no switch. And when the account you're on by then has room, the chat continues there instead of switching you away from it.
+- **An automatic switch says why.** When auto-continue switches accounts it now says which chat it switched for and when that chat stopped, for example: Switched to Work to continue "Fix the build", which stopped at its 5-hour limit at 12:51 PM.
+- **Every switch is noted with who asked for it** (the page, a notice, auto-continue, the early switch and so on) in the Switcher's log and in its record of switches, so a switch you didn't expect can be traced.
+
 ## 1.5.1
 
 - **Tells you when a newer version is out.** Once a day the Switcher asks GitHub for its latest release and, when there's a newer one, says so at the top of the Accounts page and with a small mark in the status bar, with **Update**, **What's new** and **Later**. It sends nothing about you (GitHub sees your internet address and the time, as for any website); **Later** keeps one version quiet for 7 days; turn it off with the **Check for Updates** setting in each editor.

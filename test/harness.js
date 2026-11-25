@@ -13,6 +13,7 @@ process.env.HOME = FAKE_HOME
 delete process.env.CLAUDE_CONFIG_DIR
 
 const q = { input: [], quick: [], info: [], warn: [], open: [], save: [] }
+const infoButtons = []
 const shift = (a, name) => {
   if (!a.length) throw new Error('harness: no queued response for ' + name)
   return a.shift()
@@ -105,7 +106,7 @@ const vscode = {
       const list = await items
       return list.find((i) => (i.name || i) === want || (i.label || '').includes(want)) || want
     },
-    showInformationMessage: async (m) => { messages.push('INFO: ' + m); return q.info.length ? q.info.shift() : undefined },
+    showInformationMessage: async (m, ...b) => { messages.push('INFO: ' + m); infoButtons.push({ m, b: b.filter((x) => typeof x === 'string') }); return q.info.length ? q.info.shift() : undefined },
     showWarningMessage: async (m) => { messages.push('WARN: ' + m); return q.warn.length ? q.warn.shift() : undefined },
     showErrorMessage: async (m) => { messages.push('ERROR: ' + m) },
     withProgress: async (_o, fn) => fn({ report() {} }, { isCancellationRequested: false }),
@@ -911,6 +912,13 @@ async function main() {
     /switched Claude Code to another/.test(sentNotices[3].msg) && stateOf('stop-s') === 'sent', expectTo + ' / ' + profiles.activeProfile(TEST_ROOT) + ' / sent ' + sentNotices.length + ' / state ' + stateOf('stop-s'))
   await ext._test.onPageMessage({ type: 'switch', name: prevLive })
 
+  const waitCacheFile = usageLib.cachePathForKey(TEST_ROOT, usageLib.accountKey(null))
+  const waitCacheWas = fs.existsSync(waitCacheFile) ? fs.readFileSync(waitCacheFile) : null
+  const liveFigures = (session) => usageLib.writeLiveCache(TEST_ROOT, null, { limits: [
+    { kind: 'session', percent: session, resets_at: new Date(Date.now() + 3 * 3600e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] })
+  liveFigures(100)
   usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
     { kind: 'session', percent: 100, resets_at: new Date(Date.now() + 30 * 60e3).toISOString() },
     { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
@@ -934,6 +942,53 @@ async function main() {
   check('and when it does, it switches to that account and continues the chat there', profiles.activeProfile(TEST_ROOT) === 'eve' &&
     stateOf('stop-n') === 'sent' && /switched Claude Code to another/.test(sentNotices[sentNotices.length - 1].msg))
   await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+    { kind: 'session', percent: 100, resets_at: new Date(Date.now() + 30 * 60e3).toISOString() },
+    { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+  ] }, Date.now())
+  liveFigures(100)
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+  writeChat(startOf().concat([stopRec('stop-moved', Date.now() + 3 * 3600e3)]))
+  liveSession('idle')
+  ext._test.refreshContext()
+  q.info.push(undefined)
+  await ext._test.checkLimits()
+  const waitM = autoLib.readState(TEST_ROOT).stops['stop-moved'] || {}
+  check('(a wait to continue on eve)', waitM.state === 'waiting' && waitM.to === 'eve', JSON.stringify(waitM))
+  addToChat([{ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: 'continue' } },
+    { type: 'assistant', sessionId: LSID, timestamp: new Date().toISOString(), message: { model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Carrying on.' }] } }])
+  autoLib.mark(TEST_ROOT, 'stop-moved', { resetAt: Date.now() - 61e3 })
+  const markM = messages.length
+  await ext._test.checkLimits()
+  await waitFor(() => !['waiting', 'switching'].includes(stateOf('stop-moved')), 10000)
+  check('when the chat has carried on meanwhile (continued by hand), the wait coming due doesn\'t switch, and says why',
+    stateOf('stop-moved') === 'moved' && profiles.activeProfile(TEST_ROOT) === prevLive &&
+    messages.slice(markM).some((m) => m.includes('"Fix the tests" has carried on since it stopped') && m.includes('didn\'t switch to eve')) &&
+    !messages.slice(markM).some((m) => m.includes('Switched to')),
+    stateOf('stop-moved') + ' / ' + profiles.activeProfile(TEST_ROOT) + ' | ' + messages.slice(markM).join(' || '))
+  if (profiles.activeProfile(TEST_ROOT) !== prevLive) await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  writeChat(startOf().concat([stopRec('stop-here')]))
+  const elsewhere = profiles.list(TEST_ROOT).map((p) => p.name).find((n) => n !== 'eve' && n !== prevLive) || 'nobody'
+  autoLib.updateState(TEST_ROOT, (st) => {
+    st.stops['stop-here'] = { id: 'stop-here', chat: LSID, file: LCHAT, name: 'fake-limits-1', title: 'Fix the tests', account: 'eve', kind: 'session',
+      resetAt: Date.now() - 61e3, to: elsewhere, pinned: false, stoppedAt: Date.now() - 300e3, permissionMode: 'auto', state: 'waiting', at: Date.now() - 290e3 }
+  })
+  liveFigures(5)
+  liveSession('idle')
+  ext._test.refreshContext()
+  const markH = messages.length
+  const sentH = sentNotices.length
+  await ext._test.checkLimits()
+  await waitFor(() => stateOf('stop-here') === 'sent', 10000)
+  check('when you are on an account with room by then, the chat continues there, without switching',
+    stateOf('stop-here') === 'sent' && profiles.activeProfile(TEST_ROOT) === prevLive && sentNotices.length === sentH + 1 &&
+    /switched Claude Code to another/.test(sentNotices[sentNotices.length - 1].msg) &&
+    !messages.slice(markH).some((m) => /Switched to|Couldn't switch/.test(m)),
+    stateOf('stop-here') + ' / ' + profiles.activeProfile(TEST_ROOT) + ' / to ' + elsewhere + ' | ' + messages.slice(markH).join(' || '))
+  if (profiles.activeProfile(TEST_ROOT) !== prevLive) await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+  if (waitCacheWas) fs.writeFileSync(waitCacheFile, waitCacheWas); else fs.rmSync(waitCacheFile, { force: true })
 
   usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
     { kind: 'session', percent: 5, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
@@ -1012,6 +1067,84 @@ async function main() {
     m.includes('"Fix the tests" stopped at its 5-hour limit on ') && /It's pinned to .+, so it stays on that account\./.test(m)), messages.slice(askedP).join(' || '))
   chatPinsLib.remove(TEST_ROOT, LSID)
   store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+
+  {
+    const clock = (ms) => { const d = new Date(ms); const h = d.getHours()
+      return (h % 12 || 12) + (d.getMinutes() ? ':' + String(d.getMinutes()).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm') }
+    const fiveHourStop = (uuid, agoSec, resetMin) => {
+      const at = Date.now() - agoSec * 1000
+      return { ...stopRec(uuid), timestamp: new Date(at).toISOString(), message: { model: '<synthetic>', content: [{ type: 'text',
+        text: 'You\'ve hit your 5-hour limit · resets ' + clock(at + resetMin * 60e3) + ' (Asia/Dubai)' }] } }
+    }
+    const roomOnEve = () => usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
+      { kind: 'session', percent: 5, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
+      { kind: 'weekly_all', percent: 10, resets_at: new Date(Date.now() + 5 * 86400e3).toISOString() },
+    ] }, Date.now())
+    roomOnEve()
+    const liveBefore = profiles.activeProfile(TEST_ROOT)
+    liveSession('idle')
+    writeChat(startOf().concat([fiveHourStop('stop-old', 10.5 * 3600, 39)]))
+    ext._test.refreshContext()
+    const sentBefore = sentNotices.length
+    const m0 = messages.length
+    const b0 = infoButtons.length
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    await ext._test.checkLimits()
+    await settleNotes()
+    const asked = infoButtons.slice(b0)
+    check('a stop 10.5 hours old, mode Switch accounts, an account with room: no switch and no notice sent',
+      profiles.activeProfile(TEST_ROOT) === liveBefore && sentNotices.length === sentBefore, profiles.activeProfile(TEST_ROOT) + ' / sent ' + (sentNotices.length - sentBefore))
+    check('it is asked about once, saying since when it has been stopped, and that its limit has reset',
+      asked.length === 1 && /^"Fix the tests" has been stopped at its 5-hour limit .*since .+\. That limit has reset since, so Switcher for Claude Code can continue it where it is\./.test(asked[0].m),
+      asked.map((a) => a.m).join(' || ') + ' | ' + messages.slice(m0).join(' || '))
+    check('and the offer is to continue it where it is, not to switch', asked.length === 1 && asked[0].b.includes('Continue Here') &&
+      !asked[0].b.some((b) => /^Switch to/.test(b)), JSON.stringify(asked[0] && asked[0].b))
+    check('(dismissed, it is set aside)', stateOf('stop-old') === 'skipped')
+
+    writeChat(startOf().concat([fiveHourStop('stop-old2', 10.5 * 3600, 39)]))
+    ext._test.refreshContext()
+    q.info.push('Continue Here')
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('stop-old2') === 'sent', 10000)
+    check('Continue Here sends the chat its notice, without switching', stateOf('stop-old2') === 'sent' &&
+      profiles.activeProfile(TEST_ROOT) === liveBefore && /has now reset/.test(sentNotices[sentNotices.length - 1].msg))
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'off' })
+    writeChat(startOf().concat([fiveHourStop('stop-old3', 20 * 60, 140)]))
+    ext._test.refreshContext()
+    const b1 = infoButtons.length
+    await ext._test.checkLimits()
+    check('with auto-continue off, an old stop gets nothing, not even a question', stateOf('stop-old3') === undefined && infoButtons.length === b1)
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+    const sent3 = sentNotices.length
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    await settleNotes()
+    const asked3 = infoButtons.slice(b1)
+    check('turned from Off to Switch accounts with an old stop present: no switch, one question',
+      profiles.activeProfile(TEST_ROOT) === liveBefore && sentNotices.length === sent3 && asked3.length === 1 &&
+      /has been stopped at its 5-hour limit .*since /.test(asked3[0].m) && asked3[0].b.some((b) => /^Switch to .* and Continue$/.test(b)) &&
+      asked3[0].b.some((b) => /^Continue at /.test(b)), JSON.stringify(asked3))
+
+    writeChat(startOf().concat([fiveHourStop('stop-fresh', 120, 39)]))
+    ext._test.refreshContext()
+    roomOnEve()
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('stop-fresh') === 'sent', 60000)
+    check('the same stop found 2 minutes after it was written switches and continues as before',
+      profiles.activeProfile(TEST_ROOT) === 'eve' && stateOf('stop-fresh') === 'sent' &&
+      /the 5-hour session limit/.test(sentNotices[sentNotices.length - 1].msg), stateOf('stop-fresh') + ' / ' + profiles.activeProfile(TEST_ROOT))
+    check('the switch says which chat it was for and when that chat stopped, instead of "Now signed in as"',
+      infoButtons.some((a) => /^Switched to .+ to continue "Fix the tests", which stopped at its 5-hour limit at \d{1,2}:\d{2}/.test(a.m)) &&
+      !messages.slice(-12).some((m) => m.includes('Now signed in as')), messages.slice(-12).join(' || '))
+    const lastLive = () => store.getLiveLog(TEST_ROOT).at(-1) || {}
+    check('the switch history and the log say auto-continue asked for it', lastLive().name === 'eve' && lastLive().by === 'autocontinue' &&
+      messages.some((m) => m.includes('switch to "eve": autocontinue')), JSON.stringify(lastLive()))
+    await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+    check('and a switch from the page says the page', lastLive().name === prevLive && lastLive().by === 'page' &&
+      messages.some((m) => m.includes('switch to "' + prevLive + '": page')), JSON.stringify(lastLive()))
+  }
 
   console.log('\n-- 1.5: the page\'s own order, its settings, extra usage, "has room again" --')
   {
@@ -1143,6 +1276,8 @@ async function main() {
   check('and says so, with a way back, without the usual "Now signed in" message',
     msgsFrom(mark).some((m) => m.startsWith('INFO: Switched to eve: ') && m.includes('reached 85% of its 5-hour limit') && m.includes('Work carries on')) &&
     !msgsFrom(mark).some((m) => m.includes('Now signed in as')), msgsFrom(mark).join(' | '))
+  check('and the switch history and the log say the early switch asked for it', (store.getLiveLog(TEST_ROOT).at(-1) || {}).by === 'early' &&
+    msgsFrom(mark).some((m) => m.includes('switch to "eve": early')), JSON.stringify(store.getLiveLog(TEST_ROOT).at(-1)))
   await ext._test.onPageMessage({ type: 'switch', name: prevLive })
   liveUsage(86, 20)
   mark = messages.length

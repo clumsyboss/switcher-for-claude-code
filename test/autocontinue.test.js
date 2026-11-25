@@ -77,6 +77,37 @@ console.log('when it resets')
   check('and the notice is used when the account has none', auto.resetFor(stop, null) === r)
 }
 
+console.log('only a fresh stop is handled without asking')
+{
+  const now = Date.now()
+  check('a stop 5 minutes old is fresh', auto.isFresh({ at: now - 5 * 60e3 }, now) === true)
+  check('a stop 10.5 hours old is not', auto.isFresh({ at: now - 10.5 * 3600e3 }, now) === false)
+  check('nor one just over 10 minutes old', auto.isFresh({ at: now - auto.FRESH_MS - 1000 }, now) === false)
+  check('nor one with no time', auto.isFresh({ at: null }, now) === false)
+}
+
+console.log('the 5-hour notice, as Claude Code writes it')
+{
+  const five = (t) => "You've hit your 5-hour limit · resets " + t + ' (Asia/Dubai)'
+  check('"5-hour limit" is the 5-hour limit, not a model\'s weekly one', auto.kindOf(five('1:30pm')) === 'session')
+  check('and so is "5 hour limit"', auto.kindOf("You've hit your 5 hour limit · resets 2am") === 'session')
+  check('"session limit" still is', auto.kindOf("You've hit your session limit · resets 4:10pm") === 'session')
+  check('a model\'s own limit is still the model one', auto.kindOf("You've hit your Fable limit · resets Mon 12:00am") === 'model')
+  check('and the weekly one is weekly', auto.kindOf("You've hit your weekly limit · resets Mon 12:00am") === 'weekly')
+  const from = new Date(2026, 10, 24, 12, 51).getTime()
+  const r1 = auto.parseReset(five('1:30pm'), from)
+  check('"resets 1:30pm" written at 12:51 is 39 minutes later', r1 - from === 39 * 60e3, new Date(r1).toString())
+  const r2 = auto.parseReset(five('2am'), from)
+  check('"resets 2am" written at 12:51 is 2am the next day', new Date(r2).getHours() === 2 && new Date(r2).getMinutes() === 0 &&
+    r2 > from && r2 - from < 24 * 3600e3, new Date(r2).toString())
+  const late = new Date(2026, 10, 24, 23, 10).getTime()
+  const r3 = auto.parseReset(five('3:30am'), late)
+  check('"resets 3:30am" written at 11:10pm is 3:30am the next day', new Date(r3).getHours() === 3 && new Date(r3).getMinutes() === 30 &&
+    r3 - late === (4 * 60 + 20) * 60e3, new Date(r3).toString())
+  const stop = { kind: auto.kindOf(five('1:30pm')), text: five('1:30pm'), at: from }
+  check('with no figures of the account\'s own, the reset is the notice\'s, not days ahead', auto.resetFor(stop, null) === r1)
+}
+
 console.log('which account to switch to')
 {
   const row = (name, s, w, extra) => ({ name, session: s === null ? null : { percent: s }, weekly: w === null ? null : { percent: w }, ...extra })

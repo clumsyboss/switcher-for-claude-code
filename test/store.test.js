@@ -39,6 +39,32 @@ async function main() {
   check('once fixed, everything is back', store.getPin(ROOT, '/work/app') === 'work' && store.displayOf(ROOT, 'work').label === 'Work' &&
     store.registryError(ROOT) === null)
 
+  console.log('who made an account the live one')
+  store.recordLive(ROOT, 'personal', 1000, 'autocontinue')
+  store.recordLive(ROOT, 'work', 2000, 'not-a-word')
+  const ll = store.getLiveLog(ROOT)
+  check('the history keeps a known `by`', ll.at(-2).name === 'personal' && ll.at(-2).at === 1000 && ll.at(-2).by === 'autocontinue', JSON.stringify(ll))
+  check('and leaves out one it doesn\'t know', ll.at(-1).name === 'work' && !('by' in ll.at(-1)), JSON.stringify(ll.at(-1)))
+  const withOdd = JSON.parse(fs.readFileSync(REG, 'utf8'))
+  withOdd.liveLog.push({ name: 'personal', at: 3000, by: 'by hand' })
+  fs.writeFileSync(REG, JSON.stringify(withOdd))
+  check('one written by hand with an unknown `by` is read without it, name and time kept',
+    store.getLiveLog(ROOT).at(-1).name === 'personal' && store.getLiveLog(ROOT).at(-1).at === 3000 && !('by' in store.getLiveLog(ROOT).at(-1)))
+
+  store.recordLive(ROOT, 'work', 10000, 'seen')
+  check('a window that only saw the change writes "seen"', store.getLiveLog(ROOT).at(-1).by === 'seen')
+  const before = store.getLiveLog(ROOT).length
+  store.recordLive(ROOT, 'work', 10200, 'page')
+  check('the switch\'s own word, a moment later, replaces that "seen" and adds no entry',
+    store.getLiveLog(ROOT).length === before && store.getLiveLog(ROOT).at(-1).by === 'page' && store.getLiveLog(ROOT).at(-1).at === 10000,
+    JSON.stringify(store.getLiveLog(ROOT).at(-1)))
+  store.recordLive(ROOT, 'work', 10400, 'seen')
+  store.recordLive(ROOT, 'work', 10500, 'early')
+  check('a known word is never replaced', store.getLiveLog(ROOT).length === before && store.getLiveLog(ROOT).at(-1).by === 'page')
+  store.recordLive(ROOT, 'personal', 20000, 'seen')
+  store.recordLive(ROOT, 'personal', 20000 + 31000, 'page')
+  check('and a "seen" older than half a minute stays', store.getLiveLog(ROOT).at(-1).by === 'seen' && store.getLiveLog(ROOT).at(-1).at === 20000)
+
   console.log('backups and file safety')
   store.setPin(ROOT, '/second', 'work')
   const bak = JSON.parse(fs.readFileSync(REG + '.bak', 'utf8'))

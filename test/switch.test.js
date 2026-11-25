@@ -69,7 +69,10 @@ async function main() {
   check('the account\'s Remote Control preference is applied', remote.isDisabled(OPTS) === true && heard.some((t) => /remote control disabled/.test(t)))
   check('every window hears of it (the live log)', store.getLiveLog(ROOT).slice(-1)[0].name === 'acctA')
   check('the locks are let go', !locks.isHeld(ROOT, tracker.accountLock('acctA')) && !locks.isHeld(ROOT, tracker.accountLock('acctB')))
-  await switchLib.switchAccount(ROOT, 'acctB', OPTS)
+  check('a caller that doesn\'t say who asked (Claude Hub) is "hub", in its log and the history',
+    store.getLiveLog(ROOT).slice(-1)[0].by === 'hub' && heard.includes('switch to "acctA": hub'), JSON.stringify(store.getLiveLog(ROOT).slice(-1)[0]))
+  await switchLib.switchAccount(ROOT, 'acctB', Object.assign({ by: 'page' }, OPTS))
+  check('a caller that says is kept as it said', store.getLiveLog(ROOT).slice(-1)[0].by === 'page')
   check('the leaving login was saved first: back on B, its renewed token is there', liveToken() === 'TOKEN-B2', liveToken())
   check('and its Remote Control is back on', remote.isDisabled(OPTS) === false)
 

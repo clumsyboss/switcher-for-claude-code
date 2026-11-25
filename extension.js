@@ -314,7 +314,7 @@ let contextCache = { chats: [], at: 0 }
 function refreshContext() {
   if (!editionLib.hasFeature(edition, 'context')) return
   try {
-    try { store.recordLive(root(), profilesLib.activeProfile(root())) } catch {  }
+    try { store.recordLive(root(), profilesLib.activeProfile(root()), undefined, 'seen') } catch {  }
     contextCache = { chats: contextLib.withFill(contextLib.recentChats({})), at: Date.now() }
   } catch (e) { log('context: ' + (e && e.message)) }
   updateContextBar()
@@ -698,7 +698,7 @@ async function roomBackCheck() {
     for (const f of tell) {
       log('room again: ' + f.name)
       notify('info', labelOf(f.name) + ' has room again', 'Switch').then(async (v) => {
-        if (v === 'Switch' && await confirmOrgSwitch(f.name)) await switchTo(f.name)
+        if (v === 'Switch' && await confirmOrgSwitch(f.name)) await switchTo(f.name, { by: 'roomback' })
       }, () => {})
     }
   } catch (e) {
@@ -716,7 +716,13 @@ async function checkLimits() {
     const now = Date.now()
     for (const [id, e] of Object.entries(autoLib.readState(root()).stops)) {
       if (e.state === 'waiting' && e.resetAt && now >= e.resetAt + autoLib.AFTER_RESET_MS) {
-        if (e.to && e.to !== profilesLib.activeProfile(root())) await switchAndContinue({ ...e, id }, e.to)
+        const live = profilesLib.activeProfile(root())
+        if (e.to && e.to !== live) {
+          if (autoLib.hasRoom(snapshotRows().find((r) => r.name === live), e.kind)) {
+            log('auto-continue: "' + e.title + '" continues on "' + live + '", which has room, instead of switching to "' + e.to + '"')
+            await deliverNotice(id, live === e.account ? 'reset' : 'switched')
+          } else await switchAndContinue({ ...e, id }, e.to)
+        }
         else await deliverNotice(id, 'reset')
       }
       else if (e.state === 'sent' && now - (e.sentAt || 0) > 45000) followUp(id, e)
@@ -733,7 +739,7 @@ async function checkLimits() {
       if (!chatIsHere(c) && now - (stop.at || now) < 30000) continue
       const info = contextLib.sessionInfo(c.id)
       if (!info || info.status !== 'idle' || !info.inbox || !info.name) continue
-      handleStop(c, stop, info, settings)
+      handleStop(c, stop, info, settings, now)
     }
   } catch (e) {
     log('auto-continue: ' + (e && e.message))
@@ -742,18 +748,22 @@ async function checkLimits() {
   }
 }
 
-function handleStop(chat, stop, info, settings) {
+function handleStop(chat, stop, info, settings, now) {
   const account = contextLib.accountOf(chat, accountCtx())
   const rows = snapshotRows()
   const pinned = chatPin(chat)
-  const resetAt = autoLib.resetFor(stop, rows.find((r) => r.name === (pinned || account)))
+  const old = !autoLib.isFresh(stop, now)
+  const noticeReset = old ? autoLib.parseReset(stop.text, stop.at) : null
+  const resetAt = noticeReset || autoLib.resetFor(stop, rows.find((r) => r.name === (pinned || account)))
   const entry = { id: stop.id, chat: chat.id, file: chat.file, name: info.name, title: chat.title, account: pinned || account,
-    kind: stop.kind, resetAt, pinned: !!pinned,
+    kind: stop.kind, resetAt, pinned: !!pinned, stoppedAt: stop.at || null, old,
     stillRunning: !!pinned && pinnedTo(chat) !== pinned, permissionMode: stop.permissionMode || null, state: 'new' }
   if (!autoLib.claim(root(), entry)) return
-  log('auto-continue: "' + chat.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] + (entry.account ? ' on "' + entry.account + '"' : ''))
+  log('auto-continue: "' + chat.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] + (entry.account ? ' on "' + entry.account + '"' : '') +
+    (old ? ' at ' + (stop.at ? new Date(stop.at).toISOString() : 'an unknown time') + ', too long ago to handle without asking' : ''))
   const canWait = !!resetAt && resetAt - Date.now() <= autoLib.MAX_WAIT_MS
   const to = pinned ? null : autoLib.pickAccount(rows, { exclude: entry.account, kind: stop.kind, pick: settings.pick, order: settings.order })
+  if (old) { askAbout(entry, to, canWait && resetAt > Date.now(), { reset: !!resetAt && resetAt <= Date.now() }); return }
   if (settings.mode === 'ask') { askAbout(entry, to, canWait); return }
   if (settings.mode === 'switch' && !pinned) {
     if (to) { switchAndContinue(entry, to); return }
@@ -771,15 +781,24 @@ function handleStop(chat, stop, info, settings) {
     ', which resets too far ahead to wait for, and no other account has room.')
 }
 
-function askAbout(entry, to, canWait) {
+function askAbout(entry, to, canWait, opts) {
+  const o = opts || {}
   autoLib.mark(root(), entry.id, { state: 'asked' })
-  const SWITCH = to ? 'Switch to ' + labelOf(to) + ' and Continue' : null
-  const WAIT = canWait ? 'Continue at ' + clockText(entry.resetAt) : null
-  const what = '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + (entry.account ? ' on ' + labelOf(entry.account) : '') +
-    '. Switcher for Claude Code can continue it for you.' + (entry.pinned ? (entry.stillRunning ? ' It still runs on ' + labelOf(entry.account) + '\'s pinning login until it\'s reopened, so it stays on that account.'
+  const SWITCH = to && !o.reset ? 'Switch to ' + labelOf(to) + ' and Continue' : null
+  const WAIT = canWait && !o.reset ? 'Continue at ' + clockText(entry.resetAt) : null
+  const HERE = o.reset ? 'Continue Here' : null
+  const on = entry.account ? ' on ' + labelOf(entry.account) : ''
+  const what = (entry.old
+    ? '"' + entry.title + '" has been stopped at its ' + LIMIT_WORDS[entry.kind] + on +
+      (entry.stoppedAt ? ' since ' + clockText(entry.stoppedAt) : ' for a while') +
+      (o.reset ? '. That limit has reset since, so Switcher for Claude Code can continue it where it is.'
+        : '. Switcher for Claude Code can continue it for you.')
+    : '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[entry.kind] + on + '. Switcher for Claude Code can continue it for you.') +
+    (entry.pinned ? (entry.stillRunning ? ' It still runs on ' + labelOf(entry.account) + '\'s pinning login until it\'s reopened, so it stays on that account.'
       : ' It\'s pinned to ' + labelOf(entry.account) + ', so it stays on that account.') : '')
-  notify('info', what, ...[SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
-    if (pick && pick === SWITCH) switchAndContinue(entry, to)
+  notify('info', what, ...[HERE, SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
+    if (pick && pick === HERE) deliverNotice(entry.id, 'reset')
+    else if (pick && pick === SWITCH) switchAndContinue(entry, to)
     else if (pick && pick === WAIT) waitForReset(entry, 'It')
     else {
       autoLib.mark(root(), entry.id, { state: 'skipped' })
@@ -820,12 +839,21 @@ async function switchAndContinue(entry, to) {
     return true
   })
   if (!mine) return
-  try { await switchTo(to) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
+  if (entry.file && !autoLib.limitStop(entry.file)) {
+    autoLib.mark(root(), entry.id, { state: 'moved' })
+    postState()
+    log('auto-continue: "' + entry.title + '" carried on before the switch to "' + to + '"; not switched')
+    notify('info', '"' + entry.title + '" has carried on since it stopped, so Switcher for Claude Code didn\'t switch to ' + labelOf(to) + '.')
+    return
+  }
+  try { await switchTo(to, { quiet: true, by: 'autocontinue' }) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
   if (profilesLib.activeProfile(root()) !== to) {
     autoLib.mark(root(), entry.id, { state: 'failed' })
     notify('warn', "Couldn't switch to \"" + labelOf(to) + '", so "' + entry.title + "\" wasn't continued.")
     return
   }
+  notify('info', 'Switched to ' + labelOf(to) + ' to continue "' + entry.title + '", which stopped at its ' +
+    (LIMIT_WORDS[entry.kind] || 'usage limit') + (entry.stoppedAt ? ' at ' + clockText(entry.stoppedAt) : '') + '.')
   await new Promise((r) => setTimeout(r, 2000))
   await deliverNotice(entry.id, 'switched')
 }
@@ -855,8 +883,7 @@ async function deliverNotice(id, how, opts) {
   if (!autoLib.canReceive(e.permissionMode)) {
     autoLib.mark(root(), id, { state: 'manual' })
     postState()
-    notify('info', (how === 'switched' ? 'Switched to ' + labelOf(profilesLib.activeProfile(root())) + '. '
-      : 'The limit has reset. ') + '"' + e.title + '" skips permission prompts, so it only takes "continue" from you.', 'Open Chat')
+    notify('info', (how === 'switched' ? '' : 'The limit has reset. ') + '"' + e.title + '" skips permission prompts, so it only takes "continue" from you.', 'Open Chat')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
     return
   }
@@ -1009,13 +1036,13 @@ function earlySwitchCheck() {
 async function earlySwitch(from, to, what) {
   earlyBusy = true
   try {
-    try { await switchTo(to, { quiet: true }) } catch (e) { log('early switch: ' + (e && e.message)) }
+    try { await switchTo(to, { quiet: true, by: 'early' }) } catch (e) { log('early switch: ' + (e && e.message)) }
     if (profilesLib.activeProfile(root()) !== to) {
       notify('warn', "Couldn't switch to \"" + labelOf(to) + '" early. ' + what + '.')
       return
     }
     notify('info', 'Switched to ' + labelOf(to) + ': ' + what + '. Work carries on from the next message.',
-      'Switch Back').then(async (p) => { if (p === 'Switch Back' && (await confirmOrgSwitch(from))) switchTo(from) }, () => {})
+      'Switch Back').then(async (p) => { if (p === 'Switch Back' && (await confirmOrgSwitch(from))) switchTo(from, { by: 'switchback' }) }, () => {})
   } finally {
     earlyBusy = false
   }
@@ -1286,7 +1313,7 @@ async function finalizeLogin(name, dir, st, isNew) {
   const go = await notify('info', 
     'Added "' + name + '"' + (st.email ? ' (' + st.email + ')' : '') + '. It is in the account switcher now.',
     'Switch to It Now')
-  if (go === 'Switch to It Now' && (await confirmOrgSwitch(name))) await switchToProfile(name)
+  if (go === 'Switch to It Now' && (await confirmOrgSwitch(name))) await switchToProfile(name, { by: 'added' })
 }
 
 function syncStagedLogins() {
@@ -1586,7 +1613,8 @@ async function doSwitch(name, opts) {
 
   let applied
   try {
-    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, withoutSaving: true, skipClaudeCache: claudeCacheMixed() })
+    const by = (opts && opts.by) || 'command'
+    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, by, withoutSaving: true, skipClaudeCache: claudeCacheMixed() })
     if (!res.switched) {
       notify('info', 'Already signed in as "' + labelOf(pick.name) + '".')
       return
@@ -4046,8 +4074,8 @@ const PAGE_ACTIONS = {
   switch: async (m) => {
     if (m.confirmed === true) {
       if (m.dontAsk === true) await setConfirmOrgSwitch(false)
-      await switchTo(m.name)
-    } else if (await confirmOrgSwitch(m.name)) await switchTo(m.name)
+      await switchTo(m.name, { by: 'page' })
+    } else if (await confirmOrgSwitch(m.name)) await switchTo(m.name, { by: 'page' })
     else postState()
   },
   learnMore: () => { vscode.env.openExternal(vscode.Uri.parse(PRESERVED_THINKING_URL)) },
