@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.3
+
+- **Added blur on pop-ups.** An open pop-up now blurs the Accounts page behind it as well as dimming it. High-contrast themes keep the plain dim, and so does a system set to reduce transparency.
+- **Reset times follow the time zone shown in the notice.** Claude Code's notice says, for example, "resets 3:30am (Asia/Dubai)". The Switcher read that time on the PC's own clock, so on a PC set to another time zone (after travelling, for example) auto-continue waited until the wrong time.
+- Also: with auto-continue set to **Do nothing**, a chat that was already waiting for its limit to reset is no longer continued. When its time comes you get one note saying so, with **Continue Now** in case you want it after all, and the Accounts page says it won't continue.
+
 ## 1.5.2
 
 - **Auto-continue no longer acts on its own on a chat that stopped a while ago.** Only a chat it finds stopped within 10 minutes is switched for or continued without asking. A chat that has been stopped longer, found when you turn auto-continue on or change its settings, open a window or wake the PC, is asked about once, saying since when it has been stopped; when its limit has already reset, the offer is **Continue Here**, on the account it is on, not a switch. Before, two chats stopped hours earlier could be switched for and continued as soon as the settings changed.

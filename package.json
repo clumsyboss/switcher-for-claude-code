@@ -3,7 +3,7 @@
   "displayName": "Switcher for Claude Code (Experimental) [Unofficial]",
   "description": "Switch between multiple Claude Code accounts in one click. See every account's 5-hour and weekly usage limits, auto-continue chats when a limit hits, and pin folders or chats to their own Claude account. Unofficial; not affiliated with Anthropic.",
   "icon": "media/icon.png",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "publisher": "clumsyboss",
   "private": true,
   "license": "MIT",

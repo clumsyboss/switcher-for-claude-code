@@ -716,6 +716,7 @@ async function checkLimits() {
     const now = Date.now()
     for (const [id, e] of Object.entries(autoLib.readState(root()).stops)) {
       if (e.state === 'waiting' && e.resetAt && now >= e.resetAt + autoLib.AFTER_RESET_MS) {
+        if (settings.mode === 'off') { dropWait(id, e); continue }
         const live = profilesLib.activeProfile(root())
         if (e.to && e.to !== live) {
           if (autoLib.hasRoom(snapshotRows().find((r) => r.name === live), e.kind)) {
@@ -814,6 +815,23 @@ function waitForReset(entry, subject) {
     (entry.to ? ' on ' + labelOf(entry.to) + ', the first account with room again.' : ', when the limit resets.'), 'Cancel').then((pick) => {
     if (pick === 'Cancel') cancelWait(entry)
   }, () => {})
+}
+
+function dropWait(id, e) {
+  const carried = !!e.file && !autoLib.limitStop(e.file)
+  const mine = autoLib.updateState(root(), (s) => {
+    const cur = s.stops[id]
+    if (!cur || cur.state !== 'waiting' || cur.resetAt !== e.resetAt) return false
+    s.stops[id] = { ...cur, state: carried ? 'moved' : 'cancelled' }
+    return true
+  })
+  if (!mine) return
+  postState()
+  log('auto-continue: "' + e.title + '" was due to continue' + (e.to ? ' on "' + e.to + '"' : '') +
+    ', but auto-continue is set to Do nothing' + (carried ? ' (and it has carried on since)' : '') + '; not continued')
+  if (carried) return
+  notify('info', 'Switcher for Claude Code didn\'t continue "' + e.title + '" when its limit reset, because auto-continue is set to Do nothing.',
+    'Continue Now').then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
 }
 
 function cancelWait(entry) {

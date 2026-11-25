@@ -1595,13 +1595,15 @@
     const waiting = ac.waiting && ac.waiting.length
       ? h('div', { class: 'pin-list ac-wait' }, ac.waiting.map((w) => h('div', { class: 'pin-row' }, icon('clock', 'sm'),
         h('div', { class: 'grow' }, h('span', { class: 'path ltr', text: w.title }),
-          h('span', { class: 'who', text: 'continues at ' + w.at + (w.on ? ' on ' + w.on : '') })),
+          h('span', { class: 'who', text: ac.mode === 'off' ? 'won\'t continue at ' + w.at + ' while this is set to Do nothing'
+            : 'continues at ' + w.at + (w.on ? ' on ' + w.on : '') })),
         h('button', { class: 'btn soft-danger sm', 'data-fk': 'ac:cancel:' + w.id, onclick: () => send('cancelContinue', { id: w.id }) }, 'Cancel'))))
       : null
     const how = h('details', { class: 'how' }, h('summary', null, icon('info', 'sm'), 'How it works'),
       h('p', { text: 'Switcher for Claude Code sends the stopped chat one note asking it to continue, and the chat picks up by itself, ' +
         'right there in the panel. A switch needs no reload. Chats in a pinned folder always wait for their own account, and a weekly ' +
-        'limit is never waited out. If a chat answers the note instead of continuing, you can let it trust these notes from then on.' }))
+        'limit is never waited out. If a chat answers the note instead of continuing, you can let it trust these notes from then on. ' +
+        'Set to Do nothing, it continues nothing, not even a chat already waiting for its reset.' }))
     const pick = ac.mode === 'switch' ? (ac.pick === 'order' ? 'my order' : 'most limit') : null
     const step = (ic, text, sub) => h('span', { class: 'step' }, icon(ic, 'sm'), h('span', { text }),
       sub ? h('span', { class: 'step-sub', text: '· ' + sub }) : null)

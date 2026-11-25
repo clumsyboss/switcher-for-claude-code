@@ -106,6 +106,11 @@ check('no strokes on anything — only the live account has one', strokes.length
   strokes.map((b) => b.sel + ' ' + b.prop + ': ' + b.val).join(' | '))
 check('outside high contrast, that outline is invisible', /--hc-border: transparent;/.test(css) &&
   /body\.vscode-high-contrast[\s\S]{0,80}--hc-border: var\(--vscode-contrastBorder\)/.test(css))
+const blurRule = 'body:not(.vscode-high-contrast):not(.vscode-high-contrast-light) .overlay { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }'
+check('the page behind a pop-up is blurred as well as dimmed, except in high contrast and with reduced transparency',
+  css.includes('background: rgb(0 0 0 / 0.5); }') && css.includes(blurRule) &&
+  !/^\.overlay[^{]*\{[^}]*backdrop-filter/m.test(css) &&
+  /@media \(prefers-reduced-transparency: reduce\) \{\s*body:not\(\.vscode-high-contrast\):not\(\.vscode-high-contrast-light\) \.overlay \{[^}]*backdrop-filter: none/.test(css))
 check('boxes have 16px corners, buttons 8px', /--radius: 16px;/.test(css) && /--radius-sm: 8px;/.test(css))
 const ruleFor = (sel) => (rules.find(([s]) => s === sel) || [])[1] || ''
 check('pinned folders: 8px rows, 16px on the top of the first and the bottom of the last',
@@ -197,6 +202,9 @@ check('only known colours are stored', store.validColor('teal') && !store.validC
 check('pinned folders show the account\'s avatar, a circle like everywhere else',
   /avatar\(a, 'avatar sm'\)/.test(js) && !/'square'/.test(js) && /border-radius: 50%/.test(ruleFor('.avatar')))
 check('an expired login shows no empty meters', /a\.needsLogin \? null : h\('div', \{ class: 'meters' \}/.test(js))
+
+check('set to Do nothing, a waiting chat says it won\'t continue, not when it will',
+  js.includes("ac.mode === 'off' ? 'won\\'t continue at ' + w.at + ' while this is set to Do nothing'"))
 
 console.log('\n-- wording --')
 const root = path.join(__dirname, '..')

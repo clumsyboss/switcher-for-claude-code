@@ -53,7 +53,7 @@ const onDisk = JSON.parse(fs.readFileSync(requests.requestFile(ROOT, a.id), 'utf
 check('written as <id>.json with the contract\'s fields', onDisk.v === 1 && onDisk.id === a.id && onDisk.kind === 'pinChat' &&
   onDisk.sessionId === CHAT && onDisk.account === 'Work' && onDisk.from === 'hub' && onDisk.at === t0 && onDisk.device === 'Pixel phone', JSON.stringify(onDisk))
 check('no temp file is left behind (written atomically)', files().length === 1, files().join(','))
-const b = requests.submit(ROOT, { kind: 'unpinChat', sessionId: CHAT })
+const b = requests.submit(ROOT, { kind: 'unpinChat', sessionId: CHAT, now: t0 + 1 })
 check('an unpin needs no account', b.ok === true && b.id !== a.id && !('account' in JSON.parse(fs.readFileSync(requests.requestFile(ROOT, b.id), 'utf8'))))
 check('result is null until a window answers', requests.result(ROOT, a.id) === null)
 check('result of an id that is not one is null', requests.result(ROOT, '../x') === null)

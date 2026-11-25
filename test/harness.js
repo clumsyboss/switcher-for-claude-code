@@ -988,6 +988,46 @@ async function main() {
     !messages.slice(markH).some((m) => /Switched to|Couldn't switch/.test(m)),
     stateOf('stop-here') + ' / ' + profiles.activeProfile(TEST_ROOT) + ' / to ' + elsewhere + ' | ' + messages.slice(markH).join(' || '))
   if (profiles.activeProfile(TEST_ROOT) !== prevLive) await ext._test.onPageMessage({ type: 'switch', name: prevLive })
+
+  const offWait = (id) => autoLib.updateState(TEST_ROOT, (st) => {
+    st.stops[id] = { id, chat: LSID, file: LCHAT, name: 'fake-limits-1', title: 'Fix the tests', account: prevLive, kind: 'session',
+      resetAt: Date.now() - 61e3, to: null, pinned: false, stoppedAt: Date.now() - 300e3, permissionMode: 'auto', state: 'waiting', at: Date.now() - 290e3 }
+  })
+  store.setAutoContinue(TEST_ROOT, { mode: 'off' })
+  writeChat(startOf().concat([stopRec('stop-off')]))
+  offWait('stop-off')
+  liveFigures(5)
+  liveSession('idle')
+  ext._test.refreshContext()
+  const sentO = sentNotices.length
+  const btnO = infoButtons.length
+  await ext._test.checkLimits()
+  await settleNotes()
+  const toldO = infoButtons.slice(btnO)
+  check('set to Do nothing, a wait that comes due continues nothing: no notice to the chat, no switch',
+    stateOf('stop-off') === 'cancelled' && sentNotices.length === sentO && profiles.activeProfile(TEST_ROOT) === prevLive,
+    stateOf('stop-off') + ' / sent ' + (sentNotices.length - sentO) + ' / ' + profiles.activeProfile(TEST_ROOT))
+  check('and you are told why, with Continue Now', toldO.length === 1 &&
+    toldO[0].m.includes('didn\'t continue "Fix the tests" when its limit reset, because auto-continue is set to Do nothing') &&
+    toldO[0].b.includes('Continue Now'), toldO.map((t) => t.m + ' [' + t.b.join(', ') + ']').join(' || '))
+  store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+  await ext._test.checkLimits()
+  await settleNotes()
+  check('once, and turned back on later it is still not continued', stateOf('stop-off') === 'cancelled' &&
+    sentNotices.length === sentO && infoButtons.length === btnO + 1, stateOf('stop-off') + ' / told ' + (infoButtons.length - btnO))
+  store.setAutoContinue(TEST_ROOT, { mode: 'off' })
+  writeChat(startOf().concat([stopRec('stop-off2')]))
+  addToChat([{ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: 'continue' } },
+    { type: 'assistant', sessionId: LSID, timestamp: new Date().toISOString(), message: { model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Carrying on.' }] } }])
+  offWait('stop-off2')
+  ext._test.refreshContext()
+  const btnO2 = infoButtons.length
+  await ext._test.checkLimits()
+  await settleNotes()
+  check('and when the chat has carried on meanwhile, the wait is set aside without a word',
+    stateOf('stop-off2') === 'moved' && infoButtons.length === btnO2 && sentNotices.length === sentO,
+    stateOf('stop-off2') + ' / told ' + (infoButtons.length - btnO2))
+  store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
   if (waitCacheWas) fs.writeFileSync(waitCacheFile, waitCacheWas); else fs.rmSync(waitCacheFile, { force: true })
 
   usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
@@ -1069,8 +1109,8 @@ async function main() {
   store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
 
   {
-    const clock = (ms) => { const d = new Date(ms); const h = d.getHours()
-      return (h % 12 || 12) + (d.getMinutes() ? ':' + String(d.getMinutes()).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm') }
+    const clock = (ms) => { const d = new Date(ms + 4 * 3600e3); const h = d.getUTCHours()
+      return (h % 12 || 12) + (d.getUTCMinutes() ? ':' + String(d.getUTCMinutes()).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm') }
     const fiveHourStop = (uuid, agoSec, resetMin) => {
       const at = Date.now() - agoSec * 1000
       return { ...stopRec(uuid), timestamp: new Date(at).toISOString(), message: { model: '<synthetic>', content: [{ type: 'text',

@@ -63,7 +63,7 @@ console.log('finding a stop')
 console.log('when it resets')
 {
   const from = new Date(2026, 9, 16, 12, 3).getTime()
-  const r = auto.parseReset('resets 4:10pm (Asia/Dubai)', from)
+  const r = auto.parseReset('resets 4:10pm', from)
   check('"4:10pm" is later the same day', new Date(r).getHours() === 16 && new Date(r).getMinutes() === 10 && r > from)
   check('"5pm" works without minutes', new Date(auto.parseReset('resets 5pm', from)).getHours() === 17)
   check('a time already past is tomorrow', auto.parseReset('resets 9am', from) - from > 12 * 3600e3)
@@ -94,18 +94,31 @@ console.log('the 5-hour notice, as Claude Code writes it')
   check('"session limit" still is', auto.kindOf("You've hit your session limit · resets 4:10pm") === 'session')
   check('a model\'s own limit is still the model one', auto.kindOf("You've hit your Fable limit · resets Mon 12:00am") === 'model')
   check('and the weekly one is weekly', auto.kindOf("You've hit your weekly limit · resets Mon 12:00am") === 'weekly')
-  const from = new Date(2026, 10, 24, 12, 51).getTime()
+  const from = Date.UTC(2026, 10, 24, 12 - 4, 51)
   const r1 = auto.parseReset(five('1:30pm'), from)
-  check('"resets 1:30pm" written at 12:51 is 39 minutes later', r1 - from === 39 * 60e3, new Date(r1).toString())
+  check('"resets 1:30pm" written at 12:51 is 39 minutes later', r1 - from === 39 * 60e3, new Date(r1).toISOString())
   const r2 = auto.parseReset(five('2am'), from)
-  check('"resets 2am" written at 12:51 is 2am the next day', new Date(r2).getHours() === 2 && new Date(r2).getMinutes() === 0 &&
-    r2 > from && r2 - from < 24 * 3600e3, new Date(r2).toString())
-  const late = new Date(2026, 10, 24, 23, 10).getTime()
+  check('"resets 2am" written at 12:51 is 2am the next day', r2 === Date.UTC(2026, 10, 25, 2 - 4, 0), new Date(r2).toISOString())
+  const late = Date.UTC(2026, 10, 24, 23 - 4, 10)
   const r3 = auto.parseReset(five('3:30am'), late)
-  check('"resets 3:30am" written at 11:10pm is 3:30am the next day', new Date(r3).getHours() === 3 && new Date(r3).getMinutes() === 30 &&
-    r3 - late === (4 * 60 + 20) * 60e3, new Date(r3).toString())
+  check('"resets 3:30am" written at 11:10pm is 3:30am the next day', r3 - late === (4 * 60 + 20) * 60e3, new Date(r3).toISOString())
   const stop = { kind: auto.kindOf(five('1:30pm')), text: five('1:30pm'), at: from }
   check('with no figures of the account\'s own, the reset is the notice\'s, not days ahead', auto.resetFor(stop, null) === r1)
+}
+
+console.log('the reset is read on the clock of the time zone the notice names')
+{
+  const ny = Date.UTC(2026, 10, 24, 15, 0)
+  const r = auto.parseReset("You've hit your 5-hour limit · resets 4:10pm (America/New_York)", ny)
+  check('"resets 4:10pm (America/New_York)" is 4:10pm there', r === Date.UTC(2026, 10, 24, 21, 10), new Date(r).toISOString())
+  check('a zone without a region part works too', auto.parseReset('resets 4:10pm (UTC)', ny) === Date.UTC(2026, 10, 24, 16, 10))
+  const london = auto.parseReset('resets 3am (Europe/London)', Date.UTC(2026, 9, 24, 23, 0))
+  check('across a summer-time change, the clock time is the one after it', london === Date.UTC(2026, 9, 25, 3, 0), new Date(london).toISOString())
+  const mon = auto.parseReset("You've hit your weekly limit · resets Mon 12:00am (Asia/Dubai)", Date.UTC(2026, 10, 22, 21, 0))
+  check('a weekday is the zone\'s own weekday', mon === Date.UTC(2026, 10, 29, 20, 0), new Date(mon).toISOString())
+  const from = new Date(2026, 10, 24, 12, 3).getTime()
+  check('a zone this PC doesn\'t know: read on this PC\'s clock, as before',
+    auto.parseReset('resets 4:10pm (Mars/Olympus_Mons)', from) === auto.parseReset('resets 4:10pm', from))
 }
 
 console.log('which account to switch to')
