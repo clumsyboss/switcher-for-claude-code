@@ -1,5 +1,7 @@
 # Switcher for Claude Code [Unofficial]
 
+**Your AI, always ready: more accounts, fewer interruptions.**
+
 **A Claude Code account switcher for VS Code.** Use multiple Claude accounts
 (Pro, Max, Ultra, Team) and switch between them in one click, without going
 through the browser login every time. See every account's 5-hour and weekly
@@ -8,34 +10,47 @@ its limit, and pin a folder or a single chat to its own account.
 
 ## What's new
 
-- **Sign in on the page.** **Add account** and **Sign in again** no longer open
-  a terminal. The page walks you through the browser sign-in, with a
-  **Paste code** box if the browser can't hand it back.
-- **Pinning logins.** An account can have a second login of its own for
-  pinned chats and folders, so they never sign out your other chats. It
-  replaces pin keys.
-- **Days left on every login.** A thin line round each card, and the status bar
-  after the usage figures, such as `16d · pin 23d`. Reminders come 3 days before
-  one ends and on its last day, and the switcher swaps main and pinning logins quietly
-  on the last day when it's safe.
-- **Pin a chat** to its own account, and **pin a folder without a reload**.
-- **A compact view** of the Accounts page, from the button left of **Pin chat**.
-- **Check everything** in the ⚙ menu, and a short checklist on a fresh install.
-- **A new Accounts page,** with a welcome and a one-minute tour. The account you
-  are using is the **active account**, with a soft blue glow.
-- **A heads-up before changing organization,** since chats there can't reuse
-  Claude's earlier thinking.
-- **Your plan on every card,** by Anthropic's names: Free, Pro, Max, Ultra or
-  Team (Team Max or Team Pro).
-- **Settings on the page:** choose what cards and the status bar show.
+**1.5.4**
+
+- **An activity log.** Every account switch and why, the chats that hit a limit,
+  what auto-continue did, and messages sent from your phone. After you have been
+  away for 30 minutes or more, a **While you were away** note says what happened.
+  See [The activity log](#the-activity-log).
+- **Open chat.** An entry about a chat has a button that opens it in the editor.
+- **Clearer team plan names:** Team Pro and Team Standard.
+- **A phone button,** Coming soon, beside the settings gear.
+- Every notice has its buttons under its text, and the sign-in reminder on an
+  account card sits at the bottom of the card with the usage notes.
+
+**1.5.3 to 1.5.0**
+
+- **Auto-continue is more careful.** It reads reset times in the time zone the
+  notice shows, asks about a chat that stopped a while ago instead of acting on
+  its own, no longer switches for nothing, and says which chat it switched for.
+  With **Do nothing**, a waiting chat is left alone and you get one note.
+- **Pop-ups blur the page behind them.**
+- **Tells you when a newer version is out,** and says what is new after you
+  update.
+- **A list view,** with search, filter, sort, groups by organisation and your
+  own drag-and-drop order.
+- **Usage says how old it is,** with near-limit colours, **extra usage**,
+  **use-it-or-lose-it** notes, and a **Has room again** note with **Switch**.
+- **Unpinning a chat asks first and reopens it** on your active account.
+- **Artifacts off now stops all publishing to claude.ai.**
 
 Earlier versions: see the [Changelog](CHANGELOG.md).
+
+Coming soon: use your chats from your phone with Awaydesk.
 
 ## Visuals
 
 **Add an account, switch in one click, and keep chats going at 80%:**
 
 ![Adding an account, switching accounts with the organization heads-up, and setting auto-continue to switch at 80% of the limit](docs/visuals/walkthrough.gif)
+
+**See every switch and why, and what happened while you were away:**
+
+![The activity log with a While you were away card at the top, then every switch, stopped chat and phone message, newest first](docs/visuals/activity-log.png)
 
 ## Enjoying it?
 
@@ -80,6 +95,34 @@ itself, so the Switcher tells you when a newer version is out:
 
 After an update, the Accounts page says once what's new in that version, with **See all
 changes** for the full changelog.
+
+### The phone button
+
+Next to the settings gear is a phone button. Its pop-up says what phone access
+gives you (see your chats and answer Claude from your phone) and has one action,
+which depends on **Awaydesk**, a separate extension that does the phone's work:
+
+- **Awaydesk is installed:** **Connect a phone** starts its connecting.
+- **Not installed, on Windows, and Awaydesk is in this editor's extension
+  store:** **Get Awaydesk** opens it in the Extensions view.
+- **Not in the store yet:** a quiet **Coming soon** note.
+- **macOS and Linux:** "Coming to Mac and Linux later." Awaydesk is Windows
+  first.
+
+To know whether the store has it, the Switcher asks the store, only when you
+open the pop-up and at most once a day for the whole PC:
+
+- **What it asks, and of whom.** Whether an extension with the public id
+  `clumsyboss.awaydesk` exists. VS Code and VS Code Insiders ask the VS Code
+  Marketplace (`marketplace.visualstudio.com`); Cursor, Windsurf, VSCodium and
+  other editors ask Open VSX (`open-vsx.org`). The answer is kept in
+  `~/.claude-switcher/awaydesk.json`.
+- **What it sends.** Nothing about you: no account, no email, no id, only the
+  extension's public id and the ordinary request with the name
+  `switcher-for-claude-code`. Like any website you visit, the store sees your
+  internet address and the time.
+- **Turning it off.** With **Check for Updates** off, nothing is asked and the
+  pop-up says Coming soon.
 
 ## About this project
 
@@ -155,6 +198,9 @@ exact days (see [Logins](#logins-main-and-pinning)).
 | I want to… | On the page |
 |---|---|
 | Switch account | **Switch** on its card |
+| Find, filter or sort accounts, or see them as a list | The tools line above the cards |
+| See what the Switcher did, and why | The **log** button (a clock) between **Add account** and the gear, or **⚙ → Activity log** |
+| Use my chats from my phone | The **phone** button beside the gear (see [The phone button](#the-phone-button)) |
 | Add an account | **Add account** (the sign-in happens on the page) |
 | Refresh everyone's figures | **Update usage** |
 | Start an account's 5-hour window now, without switching to it | **▶** on its card |
@@ -190,6 +236,37 @@ The links at the bottom of the page move between the two.
 The page follows your VS Code theme (light, dark or high contrast) and uses
 VS Code's own icons. It loads nothing from the network, and every button goes back to the
 extension, which checks it before doing anything.
+
+## The activity log
+
+The Switcher keeps a log of what it did, and why. Open it with the **log** button
+on the Accounts page (a clock with a back arrow) or **⚙ → Activity log**. A blue
+dot on the button means there are entries you have not looked at.
+
+- **What it lists,** newest first, grouped by day: every account switch (who asked
+  for it and the reason), chats that stopped at a limit, what auto-continue did
+  about them (waited, switched, told the chat to carry on, and how that turned
+  out), early switches, keep alive, messages sent to a chat from your phone, and
+  a login change made by something outside the Switcher.
+- **Filters:** Everything, Automatic only, Switches, Chats and From your phone.
+- **Open chat** on an entry about a chat opens that chat in the editor.
+- **How long it keeps entries:** 30 days, and at most 2,000 entries.
+- **Where it stays:** on this PC only, in `~/.claude-switcher/activity.json`.
+  Nothing is sent anywhere.
+- **What is left out:** email addresses, tokens and keys, and file paths are
+  removed from every entry. Chat titles are kept, and for a message from your
+  phone, its first 80 characters.
+- **Clearing it:** the log's menu has **Clear the log**.
+
+### While you were away
+
+If no editor window has been in front for 30 minutes or more, or you close the
+editor and open it again after that long, the Switcher tells you, once, what
+happened meanwhile: chats that stopped, what auto-continue did, early switches,
+messages from your phone and login changes. It shows on the Accounts page if that
+is open, and otherwise as one editor notice, with **See the full log** and
+**Dismiss**. Nothing is said when only small things happened, such as keep alive.
+The time you were last away is kept in `~/.claude-switcher/away.json`.
 
 ## The status bar
 
@@ -256,7 +333,8 @@ session (see [Starting a 5-hour session early](#starting-a-5-hour-session-early)
 ### Plans
 
 Each account's card shows its plan next to its email, such as **Max 20x**,
-**Team 5x** or **Pro**, as its own login reports it. An account saved before
+**Team Pro** or **Pro**. A Team seat with Max-level usage shows as
+**Team Pro**, one with Pro-level usage as **Team Standard**. An account saved before
 1.3.1 shows it after its next background renewal or switch.
 
 Some plans have no 5-hour limit, only weekly ones. For those, the card shows the
@@ -721,6 +799,9 @@ passphrase separately from the file.
   usage/                            the last live usage figures per account
   locks/                            short-lived locks, so windows never renew at once
   updates.json                      the last update check (time, latest version, its notes), Later, and the last "what's new" shown
+  activity.json                     the activity log: 30 days, at most 2,000 entries, nothing secret
+  away.json                         when an editor window was last in front, and what you were already told
+  awaydesk.json                     the last look for Awaydesk in the editor's extension store (time and answer, per store)
 ```
 
 `registry.json` is plain JSON and safe to edit by hand; the extension watches it

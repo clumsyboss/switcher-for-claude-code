@@ -41,7 +41,8 @@ function render(o) {
       ';window.__ICON_NAMES__=' + JSON.stringify(ICON_NAMES) +
       ';window.__HAS_FONT__=' + (o.fontUri ? 'true' : 'false') +
       ';window.__LAYOUT__=' + JSON.stringify(layout) +
-      ';window.__LOGO__=' + JSON.stringify(o.logoUri || null) + ';</script>\n' +
+      ';window.__LOGO__=' + JSON.stringify(o.logoUri || null) +
+      ';window.__AWAYDESK__=' + JSON.stringify(o.awaydeskUri || null) + ';</script>\n' +
     '<script nonce="' + n + '" src="' + attr(o.jsUri) + '"></script>\n' +
     '</body>\n</html>\n'
 }

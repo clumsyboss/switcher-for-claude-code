@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.4
+
+- **Activity log: every switch and why, and what happened while you were away.** A new log button on the Accounts page lists every account switch with its reason, the chats that hit a limit, what auto-continue did about them, and messages sent from your phone. Come back after 30 minutes or more away from the editor and a short **While you were away** note tells you what happened. The log stays on this PC and keeps 30 days (at most 2,000 entries). It can be cleared from its menu.
+- **Coming soon: your chats on your phone.** Beside the settings gear, a phone button opens a pop-up about using your chats from your phone through Awaydesk, a separate extension. It says Coming soon until Awaydesk is in your editor's extension store; then it offers Get Awaydesk, and with Awaydesk installed, Connect a phone. On Mac and Linux it says it is coming later. The Switcher looks in the store only when the pop-up opens, at most once a day, and sends nothing about you.
+- Also: an entry in the log about a chat has an **Open chat** button that opens that chat in the editor.
+- Also: Team seats are called Team Pro and Team Standard. A Team seat with Max-level usage shows as Team Pro, and one with Pro-level usage as Team Standard. Before, they were Team Max and Team Pro. Accounts saved earlier show the right new name without any action.
+- Also: every notice now has its buttons under its text. The sign-in reminder on an account card now lies at the bottom of the card, with the usage notes, on a solid background. The page's tagline reads "Your AI, always ready: more accounts, fewer interruptions."
+
 ## 1.5.3
 
 - **Added blur on pop-ups.** An open pop-up now blurs the Accounts page behind it as well as dimming it. High-contrast themes keep the plain dim, and so does a system set to reduce transparency.

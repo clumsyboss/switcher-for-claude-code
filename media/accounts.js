@@ -23,7 +23,7 @@
   const app = document.getElementById('app')
   fitWidth()
   window.addEventListener('resize', fitWidth)
-  if (typeof ResizeObserver === 'function') new ResizeObserver(() => { fitWidth(); fitWhens() }).observe(document.documentElement)
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => { fitWidth(); fitWhens(); fitLogFilter() }).observe(document.documentElement)
 
   let state = null
   let lastJson = ''
@@ -101,6 +101,9 @@
     'plant-ultra': '<path d="M12 21v-8"/><circle cx="12" cy="8" r="2"/><circle cx="12" cy="8" r="5"/><path d="M12 3v2M12 11v2M7 8h2M15 8h2M8.5 4.5l1.4 1.4M14.1 10.1l1.4 1.4M8.5 11.5l1.4-1.4M14.1 5.9l1.4-1.4"/><path d="M12 18c-2 0-3.5-1-3.5-2.5M12 18c2 0 3.5-1 3.5-2.5"/>',
     'plant-team': '<path d="M6 21v-6M12 21V9M18 21v-6"/><circle cx="6" cy="13" r="2"/><circle cx="12" cy="7" r="2.5"/><circle cx="18" cy="13" r="2"/>',
     zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/>',
+    history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
+    phone: '<rect width="12" height="20" x="6" y="2" rx="2"/><path d="M11 18h2"/>',
+    back: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
     signin: '<path d="M5.5 7A9 9 0 1 1 5.5 17"/><path d="M2 12h14"/><path d="m12 8 4 4-4 4"/>',
     'sort-order': '<path d="M10 6h11M10 12h11M10 18h11"/><path d="M4 10h2"/><path d="M4 6h1v4"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
     hourglass: '<path d="M5 22h14M5 2h14"/><path d="M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22"/><path d="M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/>',
@@ -109,6 +112,9 @@
     'sort-az': '<path d="m3 16 4 4 4-4"/><path d="M7 4v16"/><path d="M20 8h-5"/><path d="M15 10V6.5a2.5 2.5 0 0 1 5 0V10"/><path d="M15 14h5l-5 6h5"/>',
     fold: '<path d="M4 12h16"/><path d="M12 3v6"/><path d="m9 6 3 3 3-3"/><path d="M12 21v-6"/><path d="m9 18 3-3 3 3"/>',
     unfold: '<path d="M4 12h16"/><path d="M12 9V3"/><path d="m9 6 3-3 3 3"/><path d="M12 15v6"/><path d="m9 18 3 3 3-3"/>',
+    phone: '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
+    lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
   }
   function icon(name, cls) {
     const span = document.createElement('span')
@@ -325,7 +331,7 @@
   function openMenu(kind, name, btn, focusIndex, again) {
     const a = ((state && state.accounts) || []).find((x) => x.name === name)
     const el = kind === 'settings' ? settingsMenu()
-      : kind === 'ac-mode' ? modeMenu() : kind === 'ac-pick' ? pickMenu() : kind === 'ac-when' ? whenMenu() : kind === 'ac-sort' ? sortMenu() : kind === 'ac-filter' ? filterMenu()
+      : kind === 'ac-mode' ? modeMenu() : kind === 'ac-pick' ? pickMenu() : kind === 'ac-when' ? whenMenu() : kind === 'ac-sort' ? sortMenu() : kind === 'ac-filter' ? filterMenu() : kind === 'log' ? logMenu() : kind === 'log-filter' ? logFilterMenu()
       : !a ? null : actionsMenu(a)
     if (!el) return
     if (again) el.classList.add('still')
@@ -435,6 +441,8 @@
       choice('accountsView', 'tab', 'An editor tab'),
       choice('accountsView', 'sidebar', 'The sidebar'),
       h('hr'),
+      h('button', { role: 'menuitem', tabindex: '-1', onclick: () => { closeMenu(false); openLog() } },
+        icon('history', 'sm'), 'Activity log'),
       h('button', { role: 'menuitem', tabindex: '-1', onclick: () => { closeMenu(false); send('checkAll') } },
         icon('shield', 'sm'), 'Check everything'),
       h('button', { role: 'menuitem', tabindex: '-1', onclick: () => { closeMenu(false); startTour(TOUR) } },
@@ -522,6 +530,8 @@
     for (const a of drawn) {
       const card = app.querySelector('[data-acc="' + CSS.escape(a.name) + '"].card')
       if (!card) continue
+      const room = card.querySelector(':scope > .strip-room')
+      if (room) room.classList.toggle('with-extra', extraShown(a))
       const old = card.querySelector(':scope > .u-notes')
       const next = usageNotes(a)
       if (old && next && old.outerHTML === next.outerHTML) continue
@@ -846,14 +856,20 @@
       if (next) next.focus({ preventScroll: true })
     }
   }
+  const extraOf = (a) => (a.extra && typeof a.extra.used === 'number' && typeof a.extra.limit === 'number' ? a.extra : null)
+  const extraShown = (a) => !!extraOf(a) && !noteHidden(a, 'extra')
   function usageNotes(a) {
-    if (a.needsLogin) return null
     const hint = weeklyHint(a)
-    const x = a.extra && typeof a.extra.used === 'number' && typeof a.extra.limit === 'number' ? a.extra : null
+    const x = extraOf(a)
     const cur = (x && x.currency) || '$'
     const showHint = hint && !noteHidden(a, 'hint')
     const showX = x && !noteHidden(a, 'extra')
-    if (!showHint && !showX) return null
+    const signIn = a.needsLogin
+      ? noticeEl({ tone: 'bad', cls: 'float alert', attrs: { role: 'status' }, text: 'This account’s main login has ended.',
+        buttons: [{ label: 'Sign in again', kind: 'soft', cls: 'signin-btn', icon: 'signin', title: 'Sign in again', aria: 'Sign in again to ' + a.label,
+          fk: 'signin:' + a.name, onclick: () => send('relogin', { name: a.name }) }] })
+      : null
+    if (!showHint && !showX && !signIn) return null
     const strip = (cls, kind, ic, text, full) => h('div', { class: 'u-line ' + cls, 'data-acc': kind === 'hint' ? a.name : null, title: full },
       icon(ic, 'sm'), h('span', { class: 'u-text', text }),
       h('button', { class: 'u-x', 'data-fk': 'note-x:' + kind + ':' + a.name, title: 'Hide', 'aria-label': 'Hide this note for ' + a.label,
@@ -863,7 +879,8 @@
     return h('div', { class: 'u-notes' },
       showHint ? strip('u-hint', 'hint', 'sparkle', hintText(hint), hintFull(hint)) : null,
       showX ? strip('u-extra' + (out ? ' full' : ''), 'extra', 'zap', 'Extra usage: ' + cur + money(x.used) + '/' + money(x.limit) + (out ? ' · used up' : ''),
-        'Extra usage this month: ' + cur + money(x.used) + ' of ' + cur + money(x.limit) + (out ? ', used up' : '')) : null)
+        'Extra usage this month: ' + cur + money(x.used) + ' of ' + cur + money(x.limit) + (out ? ', used up' : '')) : null,
+      signIn)
   }
 
   function thisChat() {
@@ -1291,10 +1308,7 @@
         h('div', { class: 'head-actions' }, startBtn, pinBtn, moreBtn)),
       ctxGrid,
       a.needsLogin
-        ? h('div', { class: 'alert', role: 'status' }, icon('alert', 'sm'),
-          h('div', { class: 'grow', text: 'This account’s main login has ended.' }),
-          h('button', { class: 'btn soft sm signin-btn', title: 'Sign in again', 'aria-label': 'Sign in again to ' + a.label, 'data-fk': 'signin:' + a.name,
-            onclick: () => send('relogin', { name: a.name }) }, icon('signin', 'sm'), h('span', { class: 'btn-text', text: 'Sign in again' })))
+        ? h('div', { class: 'strip-room' + (extraShown(a) ? ' with-extra' : ''), 'aria-hidden': 'true' })
         : null,
       a.needsLogin ? null : h('div', { class: 'meters' }, meterSpecs(a).map((m) => meter(m[0], m[1], m[2], m[3], false, m[4]))),
       h('div', { class: 'card-foot' },
@@ -1320,42 +1334,39 @@
     if (u && typeof u.version === 'string' && u.restart) {
       out.push(h('div', { class: 'muted upd-restart', text: 'Restart extensions to finish updating to ' + u.version + '.' }))
     } else if (u && typeof u.version === 'string') {
-      out.push(h('div', { class: 'banner update' }, icon('info'),
-        h('div', { class: 'grow' }, h('strong', { text: 'Switcher ' + u.version + ' is available. You have ' + u.current + '.' }),
-          u.notes ? h('div', { class: 'muted upd-notes', text: String(u.notes), title: String(u.notes) }) : null),
-        h('div', { class: 'banner-actions' },
-          h('button', { class: 'btn primary sm', 'data-fk': 'banner:update', onclick: () => send('updateChoice', { choice: 'update' }) }, 'Update'),
-          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:notes', onclick: () => send('updateChoice', { choice: 'notes' }) }, 'What’s new'),
-          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:later', onclick: () => send('updateChoice', { choice: 'later' }) }, 'Later'))))
+      out.push(noticeEl({ cls: 'banner update', icon: 'info',
+        body: [h('strong', { text: 'Switcher ' + u.version + ' is available. You have ' + u.current + '.' }),
+          u.notes ? h('div', { class: 'muted upd-notes', text: String(u.notes), title: String(u.notes) }) : null],
+        buttons: [
+          { label: 'Update', fk: 'banner:update', onclick: () => send('updateChoice', { choice: 'update' }) },
+          { label: 'What’s new', fk: 'banner:notes', onclick: () => send('updateChoice', { choice: 'notes' }) },
+          { label: 'Later', fk: 'banner:later', onclick: () => send('updateChoice', { choice: 'later' }) }] }))
     }
     const w = s.whatsNew
     if (w && typeof w.version === 'string' && !s.welcome) {
       const items = Array.isArray(w.items) ? w.items.filter((t) => typeof t === 'string') : []
-      out.push(h('div', { class: 'banner upd-done' }, icon('sparkle'),
-        h('div', { class: 'grow' }, h('strong', { text: 'Updated to ' + w.version }),
-          items.length ? h('ul', { class: 'muted wn-list' }, items.map((t) => h('li', { text: t, title: t }))) : null),
-        h('div', { class: 'banner-actions' },
-          h('button', { class: 'btn ghost sm', 'data-fk': 'banner:changes', onclick: () => send('whatsNewChoice', { choice: 'all' }) }, 'See all changes'),
-          h('button', { class: 'icon-btn', 'data-fk': 'banner:wnclose', title: 'Close', 'aria-label': 'Close this notice',
-            onclick: () => send('whatsNewChoice', { choice: 'close' }) }, icon('x', 'sm')))))
+      out.push(noticeEl({ cls: 'banner upd-done', icon: 'sparkle',
+        body: [h('strong', { text: 'Updated to ' + w.version }),
+          items.length ? h('ul', { class: 'muted wn-list' }, items.map((t) => h('li', { text: t, title: t }))) : null],
+        buttons: [{ label: 'See all changes', kind: 'ghost', fk: 'banner:changes', onclick: () => send('whatsNewChoice', { choice: 'all' }) }],
+        onClose: () => send('whatsNewChoice', { choice: 'close' }), closeFk: 'banner:wnclose' }))
     }
     if (s.registryError) {
-      out.push(h('div', { class: 'banner warn' }, icon('alert'),
-        h('div', { class: 'grow' }, h('strong', { text: 'The settings file has an error' }),
-          h('div', { class: 'muted', text: s.registryError })),
-        h('button', { class: 'btn primary sm', 'data-fk': 'banner:config', onclick: () => send('openConfig') }, 'Open it')))
+      out.push(noticeEl({ tone: 'warn', cls: 'banner', icon: 'alert',
+        body: [h('strong', { text: 'The settings file has an error' }), h('div', { class: 'muted', text: s.registryError })],
+        buttons: [{ label: 'Open it', fk: 'banner:config', onclick: () => send('openConfig') }] }))
     }
     if (s.duplicates && s.duplicates.length) {
       const g = s.duplicates[0]
-      out.push(h('div', { class: 'banner warn' }, icon('alert'),
-        h('div', { class: 'grow' }, h('strong', { text: g.join(' and ') + ' are the same account' }),
-          h('div', { class: 'muted', text: 'Each holds its own login, and only one stays current. Keep one, and use ⋯ → Forget account on the others.' }))))
+      out.push(noticeEl({ tone: 'warn', cls: 'banner', icon: 'alert',
+        body: [h('strong', { text: g.join(' and ') + ' are the same account' }),
+          h('div', { class: 'muted', text: 'Each holds its own login, and only one stays current. Keep one, and use ⋯ → Forget account on the others.' })] }))
     }
     if (s.live && !s.live.saved && s.live.email) {
-      out.push(h('div', { class: 'banner warn' }, icon('alert'),
-        h('div', { class: 'grow' }, h('strong', { text: 'Your current login isn’t saved yet' }),
-          h('div', { class: 'muted', text: s.live.email + ' · Save it so you can come back to it any time.' })),
-        h('button', { class: 'btn primary sm', 'data-fk': 'banner:save', onclick: () => send('saveCurrent') }, 'Save it')))
+      out.push(noticeEl({ tone: 'warn', cls: 'banner', icon: 'alert',
+        body: [h('strong', { text: 'Your current login isn’t saved yet' }),
+          h('div', { class: 'muted', text: s.live.email + ' · Save it so you can come back to it any time.' })],
+        buttons: [{ label: 'Save it', fk: 'banner:save', onclick: () => send('saveCurrent') }] }))
     }
     const told = new Set()
     for (const a of s.accounts || []) {
@@ -1363,30 +1374,24 @@
       told.add(a.label)
       const n = pinCount(a.name)
       const what = n === 1 ? 'Its pinned chat or folder uses' : 'Its ' + n + ' pinned chats and folders use'
-      out.push(a.pinning
-        ? h('div', { class: 'banner warn' }, icon('pin'),
-          h('div', { class: 'grow' }, h('strong', { text: a.label + '’s pinning login has ended' }),
-            h('div', { class: 'muted', text: what + ' the active account until you sign in again.' })),
-          h('button', { class: 'btn primary sm', 'data-fk': 'banner:pin:' + a.name, onclick: () => send('addPinning', { name: a.name }) }, 'Sign in again'))
-        : h('div', { class: 'banner warn' }, icon('pin'),
-          h('div', { class: 'grow' }, h('strong', { text: a.label + ' needs a pinning login' }),
-            h('div', { class: 'muted', text: what + ' the active account until it has one.' })),
-          h('button', { class: 'btn primary sm', 'data-fk': 'banner:pin:' + a.name, onclick: () => send('addPinning', { name: a.name }) },
-            'Add account for pinning')))
+      out.push(noticeEl({ tone: 'warn', cls: 'banner', icon: 'pin',
+        body: a.pinning
+          ? [h('strong', { text: a.label + '’s pinning login has ended' }), h('div', { class: 'muted', text: what + ' the active account until you sign in again.' })]
+          : [h('strong', { text: a.label + ' needs a pinning login' }), h('div', { class: 'muted', text: what + ' the active account until it has one.' })],
+        buttons: [{ label: a.pinning ? 'Sign in again' : 'Add account for pinning', fk: 'banner:pin:' + a.name, onclick: () => send('addPinning', { name: a.name }) }] }))
     }
     const needs = s.window && (s.window.needsPinning || s.window.needsKey)
     if (needs && !told.has(needs)) {
       const a = (s.accounts || []).find((x) => x.label === needs)
-      out.push(h('div', { class: 'banner warn' }, icon('pin'),
-        h('div', { class: 'grow' }, h('strong', { text: 'This folder is pinned to ' + needs + ', which needs a pinning login' }),
-          h('div', { class: 'muted', text: 'Chats here use the active account until it has one.' })),
-        a ? h('button', { class: 'btn primary sm', 'data-fk': 'banner:needs', onclick: () => send('addPinning', { name: a.name }) },
-          'Add account for pinning') : null))
+      out.push(noticeEl({ tone: 'warn', cls: 'banner', icon: 'pin',
+        body: [h('strong', { text: 'This folder is pinned to ' + needs + ', which needs a pinning login' }),
+          h('div', { class: 'muted', text: 'Chats here use the active account until it has one.' })],
+        buttons: a ? [{ label: 'Add account for pinning', fk: 'banner:needs', onclick: () => send('addPinning', { name: a.name }) }] : [] }))
     }
     if (s.window && s.window.pinnedTo) {
-      out.push(h('div', { class: 'banner' }, icon('pin'),
-        h('div', { class: 'grow' }, h('strong', null, h('span', { class: 'nw-hide', text: 'This folder is pinned to ' }), h('span', { class: 'nw-only', text: 'Pinned to ' }), s.window.pinnedLabel)),
-        h('button', { class: 'btn ghost sm', 'data-fk': 'banner:change', onclick: () => send('pin') }, 'Change')))
+      out.push(noticeEl({ cls: 'banner', icon: 'pin',
+        body: h('strong', null, h('span', { class: 'nw-hide', text: 'This folder is pinned to ' }), h('span', { class: 'nw-only', text: 'Pinned to ' }), s.window.pinnedLabel),
+        buttons: [{ label: 'Change', kind: 'ghost', fk: 'banner:change', onclick: () => send('pin') }] }))
     }
     return out
   }
@@ -1626,9 +1631,8 @@
   }
 
   function waitStrip(c, key) {
-    return h('div', { class: 'wait-strip' }, icon('clock', 'sm'),
-      h('span', { class: 'wait-text', text: 'Moves to ' + c.label + ' when this reply finishes' }),
-      h('button', { class: 'btn soft sm', 'data-fk': key, onclick: () => reopenNowDialog(c) }, 'Reopen now'))
+    return noticeEl({ cls: 'inline wait-strip', icon: 'clock', text: 'Moves to ' + c.label + ' when this reply finishes',
+      buttons: [{ label: 'Reopen now', kind: 'soft', fk: key, onclick: () => reopenNowDialog(c) }] })
   }
 
   function pinsSection() {
@@ -1990,6 +1994,56 @@
     said()
   }
 
+  function phoneArt() {
+    const src = typeof window.__AWAYDESK__ === 'string' && window.__AWAYDESK__ ? window.__AWAYDESK__ : null
+    return src ? h('div', { class: 'phone-art' }, h('img', { src, alt: '', width: '500', height: '500', draggable: 'false' })) : null
+  }
+
+  const phoneOf = () => Object.assign({ mode: 'soon', checking: false }, (state && state.phone) || {})
+  function phoneButton() {
+    if (!state || !state.phone) return null
+    return h('button', { class: 'btn ghost icon-only phone-btn', 'data-fk': 'phone', title: 'Use your chats from your phone', 'aria-label': 'Phone',
+      'aria-haspopup': 'dialog', onclick: () => phoneDialog() }, icon('phone', 'sm'))
+  }
+
+  function phoneDialog() {
+    const tid = uid()
+    const box = h('div', { class: 'dialog phone-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': tid })
+    let drawn = ''
+    const close = () => closePop(pop)
+    const draw = () => {
+      const p = phoneOf()
+      const json = JSON.stringify(p)
+      if (json === drawn) return
+      const hadFocus = box.contains(document.activeElement)
+      drawn = json
+      let first = null
+      let note = null
+      let go = null
+      if (p.mode === 'connect') go = h('button', { class: 'btn primary', onclick: () => { send('phoneAction'); close() } }, 'Connect a phone')
+      else if (p.mode === 'get') go = h('button', { class: 'btn primary', onclick: () => { send('phoneAction'); close() } }, 'Get Awaydesk')
+      else if (p.mode === 'other') note = h('span', { class: 'phone-soon', text: 'Coming to Mac and Linux later.' })
+      else note = h('span', { class: 'phone-soon', text: p.checking ? 'Looking for Awaydesk…' : 'Coming soon' })
+      const closeBtn = h('button', { class: 'btn ghost', onclick: close }, 'Close')
+      box.replaceChildren(xBtn(close),
+        h('div', null, h('h3', { id: tid, text: 'Use your chats from your phone' })),
+        phoneArt(),
+        h('ul', { class: 'phone-points' },
+          ...[['phone', 'See your chats, answer Claude and switch accounts from anywhere: home, office or mobile data.'],
+            ['globe', 'Nothing to install on the phone. Scan a code and your chats open in its browser.'],
+            ['lock', 'End-to-end encryption all the way from your phone to this PC.']]
+            .map(([ic, text]) => h('li', null, icon(ic, 'sm'), h('span', { text })))),
+        h('div', { class: 'actions' }, note, closeBtn, go))
+      first = go || closeBtn
+      fitActions(box)
+      if (hadFocus) first.focus()
+    }
+    const pop = showDialog(box, { cancel: close, refresh: draw })
+    draw()
+    send('phoneOpen')
+    box.querySelector('.actions .btn:last-child').focus()
+  }
+
   function checksBox(spec, answer) {
     let sp = spec
     const tid = uid()
@@ -2097,20 +2151,27 @@
     pop.timer = setTimeout(() => closePop(pop), 400)
   }
 
+  function noticeEl(o) {
+    const tone = o.tone === 'bad' || o.tone === 'warn' ? o.tone : 'info'
+    const buttons = (o.buttons || []).filter(Boolean)
+    return h('div', Object.assign({ class: 'notice ' + tone + (o.onClose ? '' : ' no-x') + (o.cls ? ' ' + o.cls : '') }, o.attrs),
+      h('span', { class: 'i' }, icon(o.icon || (tone === 'info' ? 'info' : 'alert'), 'sm')),
+      h('div', { class: 'notice-body' }, o.body || h('div', { class: 'notice-text', text: String(o.text || '') })),
+      o.onClose ? h('button', { class: 'icon-btn notice-x', 'data-fk': o.closeFk, title: 'Close', 'aria-label': 'Close this notice', onclick: o.onClose }, icon('x', 'sm')) : null,
+      buttons.length ? h('div', { class: 'notice-actions' }, buttons.map((b, i) =>
+        h('button', { class: 'btn sm ' + (b.kind || (i === 0 ? 'primary' : 'ghost')) + (b.cls ? ' ' + b.cls : ''), 'data-fk': b.fk, title: b.title, 'aria-label': b.aria,
+          onclick: b.onclick }, b.icon ? icon(b.icon, 'sm') : null, b.icon ? h('span', { class: 'btn-text', text: b.label }) : b.label))) : null)
+  }
+
   const NOTE_MS = 12000
   let noteStack = null
   function showNote(n) {
     if (!n || typeof n.id !== 'number' || (noteStack && noteStack.querySelector('[data-note="' + n.id + '"]'))) return
     if (!noteStack) { noteStack = h('div', { class: 'note-stack', role: 'status', 'aria-live': 'polite' }); document.body.appendChild(noteStack) }
     const buttons = Array.isArray(n.buttons) ? n.buttons : []
-    const tone = n.tone === 'error' ? 'bad' : n.tone === 'warn' ? 'warn' : 'info'
     const done = (label) => { dropNote(n.id); send('note', { id: n.id, label }) }
-    const el = h('div', { class: 'note ' + tone, 'data-note': String(n.id) },
-      h('span', { class: 'i' }, icon(tone === 'info' ? 'info' : 'alert', 'sm')),
-      h('div', { class: 'grow' }, h('div', { class: 'note-text', text: String(n.text || '') }),
-        buttons.length ? h('div', { class: 'note-actions' }, buttons.map((b, i) =>
-          h('button', { class: 'btn sm ' + (i === 0 ? 'primary' : 'ghost'), onclick: () => done(b) }, b))) : null),
-      h('button', { class: 'icon-btn note-x', title: 'Close', 'aria-label': 'Close this notice', onclick: () => done(null) }, icon('x', 'sm')))
+    const el = noticeEl({ tone: n.tone === 'error' ? 'bad' : n.tone === 'warn' ? 'warn' : 'info', text: n.text, cls: 'note', attrs: { 'data-note': String(n.id) },
+      buttons: buttons.map((b) => ({ label: String(b), onclick: () => done(b) })), onClose: () => done(null) })
     noteStack.appendChild(el)
     if (!buttons.length) setTimeout(() => { if (el.isConnected) done(null) }, NOTE_MS)
   }
@@ -2536,6 +2597,390 @@
     if (cvPending) { cvPending = false; requestAnimationFrame(() => renderSafely()) }
   }
 
+  let view = 'accounts'
+  let logBox = null
+  let logFilter = 'all'
+  let logShow = 60
+  let away = null
+  let awayDots = null
+
+  const LOG_FILTERS = [['all', 'Everything'], ['auto', 'Automatic only'], ['switch', 'Switches'], ['chat', 'Chats'], ['phone', 'From your phone']]
+  const LIMIT_WORDS = { session: '5-hour limit', weekly: 'weekly limit', model: 'weekly limit for that model' }
+  const txt = (v) => (typeof v === 'string' ? v : '')
+  const qt = (t) => '“' + txt(t || 'a chat') + '”'
+  const poss = (l) => l + '’s'
+  const timeOnly = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/s?([AP])M$/i, (m, x) => ' ' + x.toLowerCase() + 'm')
+  const who = (e, k) => txt(e[k + 'Label']) || txt(e[k]) || 'another account'
+  const lim = (e) => LIMIT_WORDS[e.limit] || 'usage limit'
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many)
+
+  function span(ms) {
+    const m = Math.max(1, Math.round(ms / 60000))
+    if (m < 60) return m + ' min'
+    const hr = Math.floor(m / 60)
+    if (hr >= 48) return Math.round(hr / 24) + ' days'
+    if (hr >= 10) return Math.round(m / 60) + ' h'
+    return hr + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '')
+  }
+
+  function switchReason(e) {
+    const to = who(e, 'to')
+    const used = typeof e.toUsed === 'number' ? Math.round(e.toUsed) + '% used' : ''
+    if (e.by === 'autocontinue') {
+      const stopped = e.chat ? qt(e.chat) + ' stopped at ' + poss(who(e, 'from')) + ' ' + lim(e) + (e.resetAt ? ' (resets ' + clockText(e.resetAt) + ')' : '') + '. ' : ''
+      if (e.waited) return stopped + 'No account had room, so it waited. ' + to + ' was the first to have room again' + (used ? ': ' + used : '') + '.'
+      if (e.pick === 'order') return stopped + to + ' was the first in your list with room' + (used ? ': ' + used : '') + '.'
+      return stopped + to + ' had the most room' + (used ? ': ' + used : '') + '.'
+    }
+    if (e.by === 'early') {
+      const w = e.limit === 'weekly'
+      return who(e, 'from') + ' had used ' + (typeof e.fromUsed === 'number' ? Math.round(e.fromUsed) + '%' : 'most') + ' of its ' + (w ? 'weekly limit' : '5-hour limit') +
+        (!w && e.threshold ? ', the share you set (' + e.threshold + '%)' : '') + '. ' + to + ' had room to spare' + (used ? ': ' + used : '') + '.'
+    }
+    return ''
+  }
+
+  function logWords(e) {
+    const r = { title: '', why: '', sub: '', tag: null, needs: false, group: 'other', ic: 'info', tone: 'info', flow: null }
+    const from = who(e, 'from')
+    const to = who(e, 'to')
+    switch (e.kind) {
+      case 'switch': {
+        r.group = 'switch'; r.ic = 'swap'; r.flow = { from: e.from ? { name: txt(e.from), label: from } : null, to: { name: txt(e.to), label: to } }
+        const was = e.from ? ' from ' + from : ''
+        const how = {
+          page: ['You switched' + was + ' to ' + to + ' on the Accounts page.', 'you'],
+          command: ['You switched' + was + ' to ' + to + ' with a command.', 'you'],
+          roomback: ['You switched' + was + ' to ' + to + ' from the notice that it has room again.', 'you'],
+          added: ['You added ' + to + ' and switched to it' + was + '.', 'you'],
+          switchback: ['You pressed Switch Back, so ' + to + ' is the account again' + (e.from ? ' instead of ' + from : '') + '.', 'you'],
+          hub: ['Awaydesk switched' + was + ' to ' + to + '.', null],
+          seen: [e.from ? 'The account Claude Code uses changed from ' + from + ' to ' + to + '.' : 'Claude Code is using ' + to + '.', 'noticed'],
+          autocontinue: e.asked
+            ? ['You chose to switch' + was + ' to ' + to + (e.chat ? ' so ' + qt(e.chat) + ' could carry on' : '') + '.', 'you']
+            : ['Auto-continue switched' + was + ' to ' + to + '.', 'auto'],
+          early: e.asked
+            ? ['You chose Switch Now' + was + ' to ' + to + '.', 'you']
+            : ['Switched early' + was + ' to ' + to + ', before a limit stopped anything.', 'auto'],
+        }[e.by] || ['The account changed' + was + ' to ' + to + '.', null]
+        r.title = how[0]; r.tag = how[1]
+        if (e.by === 'autocontinue' || e.by === 'early') r.why = switchReason(e)
+        if (e.by === 'switchback') r.why = 'It undid an early switch.'
+        if (e.by === 'seen') r.why = 'Something outside Switcher did this, such as a sign-in in a terminal or another program.'
+        if (e.by === 'hub') r.why = 'Another program on this PC asked for it.'
+        break
+      }
+      case 'stop':
+        r.group = 'chat'; r.ic = 'alert'; r.tone = 'warn'
+        r.title = qt(e.chat) + ' stopped at ' + (e.accountLabel ? poss(e.accountLabel) : 'its account’s') + ' ' + lim(e) + (e.resetAt ? ' (resets ' + clockText(e.resetAt) + ')' : '') + '.'
+        if (e.lateMs) r.why = 'Found ' + span(e.lateMs) + ' after it stopped, so Switcher only asked you about it.'
+        else if (e.asked) r.why = 'Auto-continue is set to Ask, so it asked you what to do.'
+        break
+      case 'wait':
+        r.group = 'chat'; r.ic = 'hourglass'; r.tag = e.asked ? 'you' : 'auto'
+        r.title = e.toLabel ? 'Waiting to continue ' + qt(e.chat) + ' on ' + e.toLabel + ' at ' + clockText(e.resetAt) + '.'
+          : 'Waiting to continue ' + qt(e.chat) + ' at ' + clockText(e.resetAt) + ', when ' + poss(who(e, 'accountLabel')) + ' limit resets.'
+        if (e.toLabel) r.why = 'No account had room now. ' + e.toLabel + ' is the first to have room again.'
+        break
+      case 'waitend': {
+        r.group = 'chat'; r.ic = 'x'
+        const t = {
+          cancelled: ['You cancelled the wait for ' + qt(e.chat) + '.', 'you', ''],
+          off: [qt(e.chat) + ' was due to continue, but it wasn’t continued.', 'auto', 'Auto-continue was set to Do nothing at that moment.'],
+          moved: [qt(e.chat) + ' carried on by itself, so there was nothing to continue.', 'auto', ''],
+          skipped: [qt(e.chat) + ' was left stopped.', 'auto', 'Its limit resets too far ahead to wait for (more than 24 hours)' + (e.resetAt ? ', at ' + clockText(e.resetAt) : '') + ', and no other account had room.'],
+          declined: [qt(e.chat) + ' was left stopped.', 'you', 'You didn’t pick an option when Switcher asked.'],
+        }[e.how] || [qt(e.chat) + ' wasn’t continued.', null, '']
+        r.title = t[0]; r.tag = t[1]; r.why = t[2]
+        break
+      }
+      case 'continue': {
+        r.group = 'chat'; r.ic = 'play'; r.tag = e.asked ? 'you' : 'auto'
+        const on = who(e, 'accountLabel')
+        r.title = e.how === 'switched' ? 'Told ' + qt(e.chat) + ' to carry on, now on ' + on + '.'
+          : e.how === 'again' ? 'Told ' + qt(e.chat) + ' to carry on again, after you let it trust Switcher’s notes.'
+            : 'Told ' + qt(e.chat) + ' to carry on, because ' + poss(on) + ' limit had reset.'
+        if (e.stoppedAt) r.why = 'It had been stopped since ' + clockText(e.stoppedAt) + (e.at - e.stoppedAt >= 2 * 60000 ? ' (' + span(e.at - e.stoppedAt) + ')' : '') + '.'
+        const o = {
+          sent: ['Sent. Waiting to see whether it picked it up.', false],
+          continued: ['It went back to work.', false],
+          replied: ['It answered the note instead of carrying on, so it needs you.', true],
+          limited: ['It hit a limit again.', false],
+          failed: ['The note didn’t get through, so it needs you.', true],
+          closed: ['The chat was closed, so it couldn’t be continued. It needs you.', true],
+          manual: ['It skips permission prompts, so it only takes “continue” from you.', true],
+        }[e.outcome]
+        if (o) { r.sub = o[0]; r.needs = o[1]; if (o[1]) r.tone = 'warn' }
+        break
+      }
+      case 'phone':
+        r.group = 'phone'; r.ic = 'phone'
+        r.title = (e.count > 1 ? plural(e.count, 'message', 'messages') + ' from your phone went to ' : 'A message from your phone went to ') + qt(e.chat) + '.'
+        if (e.count > 1 && e.until) r.why = 'Between ' + timeOnly(e.at) + ' and ' + timeOnly(e.until) + '.'
+        if (e.preview) r.sub = '“' + txt(e.preview) + '”'
+        break
+      case 'phonestart':
+        r.group = 'phone'; r.ic = 'phone'
+        r.title = 'A chat was started from your phone: ' + qt(e.chat) + '.'
+        r.why = 'It runs on ' + who(e, 'accountLabel') + '.'
+        break
+      case 'keepalive':
+        r.ic = 'zap'; r.tag = 'auto'
+        r.title = e.ok ? 'Keep alive started the next 5-hour window on ' + who(e, 'accountLabel') + '.' : 'Keep alive couldn’t start the next 5-hour window on ' + who(e, 'accountLabel') + '.'
+        if (!e.ok) r.tone = 'warn'
+        break
+      case 'lastday':
+        r.ic = 'login'; r.tag = 'auto'
+        r.title = poss(who(e, 'accountLabel')) + ' main login was on its last day, so it swapped places with its pinning login.'
+        r.why = 'Chats pinned to it carry on as before.'
+        break
+      case 'roomagain':
+        r.ic = 'sparkle'; r.tag = 'auto'
+        r.title = who(e, 'accountLabel') + ' has room again, and Switcher told you so.'
+        break
+      default:
+        r.title = 'Something happened.'
+    }
+    return r
+  }
+
+  const inFilter = (e, f) => f === 'all' || (f === 'auto' ? logWords(e).tag === 'auto' : logWords(e).group === f)
+
+  function dayLabel(t) {
+    const d = new Date(t)
+    const n = new Date(now())
+    const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+    const diff = Math.round((start(n) - start(d)) / DAY)
+    if (diff === 0) return 'Today'
+    if (diff === 1) return 'Yesterday'
+    return d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })
+  }
+
+  function openLog() {
+    view = 'log'; logFilter = 'all'; logShow = 60
+    if (logBox) logBox.asking = true
+    send('logOpen')
+    renderSafely()
+    window.scrollTo(0, 0)
+  }
+  function closeLog() {
+    view = 'accounts'; awayDots = null
+    send('logClose')
+    renderSafely()
+    window.scrollTo(0, 0)
+    const b = app.querySelector('[data-fk="log"]')
+    if (b) b.focus({ preventScroll: true })
+  }
+  function clearLogDialog() {
+    const box = confirmBox({ title: 'Clear the log?',
+      message: 'This removes every entry from the list. Nothing else changes: your accounts, chats and settings stay as they are.',
+      buttons: ['Clear the log'] }, (d) => { closePop(pop); if (d) { logBox = { entries: [], more: false }; send('logClear'); renderSafely() } })
+    const pop = showDialog(box)
+    box.querySelector('.actions .btn.primary').focus()
+  }
+  function logMenu() {
+    return h('div', { class: 'menu', role: 'menu', 'aria-label': 'Log', tabindex: '-1' },
+      h('button', { role: 'menuitem', tabindex: '-1', disabled: logBox && logBox.entries.length ? null : true, class: 'danger',
+        onclick: () => { closeMenu(false); clearLogDialog() } }, icon('trash', 'sm'), 'Clear the log…'),
+      h('div', { class: 'hint', text: 'Entries are kept for 30 days on this PC.' }))
+  }
+
+  function logFilterMenu() {
+    const all = (logBox && logBox.entries) || []
+    return h('div', { class: 'menu choices-menu filter-menu', role: 'menu', 'aria-label': 'Show in the log', tabindex: '-1' },
+      LOG_FILTERS.map(([k, label]) => h('button', { role: 'menuitemradio', 'aria-checked': String(logFilter === k), tabindex: '-1',
+        onclick: () => { closeMenu(false); logFilter = k; logShow = 60; renderSafely() } },
+      h('span', { class: 'mi-check' }, logFilter === k ? icon('check', 'sm') : null),
+      h('span', { class: 'grow mi-name', text: label }),
+      all.length ? h('span', { class: 'mi-n', text: String(all.filter((e) => inFilter(e, k)).length) }) : null)))
+  }
+  function fitLogFilter() {
+    const box = app.querySelector('.lg-filter')
+    if (!box) return
+    const chips = box.querySelector('.lg-chips')
+    box.classList.remove('pilled')
+    const pilled = chips.offsetWidth > box.clientWidth
+    box.classList.toggle('pilled', pilled)
+    chips.toggleAttribute('inert', pilled)
+    const pill = box.querySelector('.lg-pill')
+    if (pilled && chips.contains(document.activeElement)) pill.focus({ preventScroll: true })
+    if (pilled) chips.setAttribute('aria-hidden', 'true'); else chips.removeAttribute('aria-hidden')
+    if (!pilled && menu && menu.kind === 'log-filter') closeMenu(false)
+  }
+
+  const openable = (e) => ['stop', 'wait', 'waitend', 'continue', 'phone', 'phonestart'].includes(e.kind) && typeof e.chatId === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(e.chatId)
+
+  function logRow(e, fresh) {
+    const w = logWords(e)
+    const side = (a) => a ? h('span', { class: 'lg-acct' }, avatar(accountByName(a.name) || { name: a.name || a.label, label: a.label }, 'avatar xs'), h('span', { class: 'lg-an', text: a.label })) : null
+    const tag = w.needs ? h('span', { class: 'lg-tag needs', text: 'Needs you' })
+      : w.tag === 'auto' ? h('span', { class: 'lg-tag auto', text: 'Automatic' })
+        : w.tag === 'you' ? h('span', { class: 'lg-tag you', text: 'You' })
+          : w.tag === 'noticed' ? h('span', { class: 'lg-tag', text: 'Noticed' }) : null
+    return h('li', { class: 'lg-row ' + w.tone + (w.needs ? ' needs' : '') + (fresh ? ' fresh' : ''), 'data-kind': e.kind },
+      h('span', { class: 'lg-ic', 'aria-hidden': 'true' }, icon(w.ic, 'sm')),
+      h('div', { class: 'lg-main' },
+        h('div', { class: 'lg-title', text: w.title, title: w.title }),
+        w.flow ? h('div', { class: 'lg-flow' }, side(w.flow.from), w.flow.from ? icon('arrow', 'sm') : null, side(w.flow.to)) : null,
+        w.why ? h('div', { class: 'lg-why', text: w.why, title: w.why }) : null,
+        w.sub ? h('div', { class: 'lg-sub', text: w.sub, title: w.sub }) : null,
+        tag || openable(e) ? h('div', { class: 'lg-tags' }, tag, openable(e) ? h('button', { class: 'btn soft sm', 'data-fk': 'log:open:' + e.id,
+          title: 'Open this chat in the editor', onclick: () => send('openChat', { id: e.chatId }) }, 'Open chat') : null) : null),
+      h('div', { class: 'lg-time', title: new Date(e.at).toLocaleString(), text: timeOnly(e.at) }),
+      fresh ? h('span', { class: 'lg-dot', title: 'Since you left', 'aria-label': 'Since you left' }) : null)
+  }
+
+  function logPage() {
+    const all = (logBox && logBox.entries) || []
+    const counts = {}
+    for (const [k] of LOG_FILTERS) counts[k] = all.filter((e) => inFilter(e, k)).length
+    const list = all.filter((e) => inFilter(e, logFilter))
+    const shown = list.slice(0, logShow)
+    const head = h('header', { class: 'top lg-top' },
+      h('button', { class: 'btn ghost icon-only', 'data-fk': 'log:back', title: 'Back to accounts', 'aria-label': 'Back to accounts', onclick: closeLog }, icon('back', 'sm')),
+      h('div', { class: 'top-text lg-heading' }, h('h1', { text: 'Activity log' })),
+      h('button', { class: 'btn ghost icon-only', 'data-menu': 'log:x', title: 'More', 'aria-label': 'More', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+        onclick: (e) => toggleMenu('log', 'x', e.currentTarget, e) }, icon('kebab', 'sm')))
+    const countOf = (k) => (all.length ? String(counts[k]) : null)
+    const chosen = LOG_FILTERS.find((f) => f[0] === logFilter) || LOG_FILTERS[0]
+    const chips = h('div', { class: 'lg-chips', role: 'radiogroup', 'aria-label': 'Show' },
+      LOG_FILTERS.map(([k, label]) => h('button', { class: 'lg-chip' + (logFilter === k ? ' on' : ''), role: 'radio', 'aria-checked': String(logFilter === k),
+        'data-fk': 'log:f:' + k, onclick: () => { logFilter = k; logShow = 60; renderSafely() } },
+      label, all.length && k !== 'all' ? h('span', { class: 'lg-n', text: String(counts[k]) }) : null)))
+    const pill = h('button', { class: 'lg-chip lg-pill', 'data-menu': 'log-filter:x', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      'aria-label': 'Show: ' + chosen[1] + (countOf(chosen[0]) ? ', ' + countOf(chosen[0]) : ''),
+      onclick: (e) => toggleMenu('log-filter', 'x', e.currentTarget, e) },
+    h('span', { text: chosen[1] }), countOf(chosen[0]) ? h('span', { class: 'lg-n', text: countOf(chosen[0]) }) : null, icon('down', 'sm'))
+    const filters = h('div', { class: 'lg-filter' }, chips, pill)
+    const body = []
+    if (!all.length && !(logBox && logBox.asking)) {
+      body.push(h('div', { class: 'empty lg-empty' }, icon('history'), h('strong', { text: 'Nothing here yet' }),
+        h('span', { text: 'When Switcher switches your account, a chat stops at a limit and carries on, or a message comes from your phone, it shows up here.' })))
+    } else if (!all.length) {
+      body.push(h('div', { class: 'empty lg-empty', text: 'Loading…' }))
+    } else if (!list.length) {
+      body.push(h('div', { class: 'empty lg-empty' }, h('strong', { text: 'Nothing matches' }),
+        h('span', { text: 'Nothing in the log is “' + LOG_FILTERS.find((f) => f[0] === logFilter)[1].toLowerCase() + '” yet.' })))
+    } else {
+      let day = null
+      let ul = null
+      const perDay = new Map()
+      for (const e of list) { const d = dayLabel(e.at); perDay.set(d, (perDay.get(d) || 0) + 1) }
+      for (const e of shown) {
+        const d = dayLabel(e.at)
+        if (d !== day) {
+          day = d
+          ul = h('ul', { class: 'lg-list' })
+          body.push(h('section', { class: 'lg-day' }, h('h2', { class: 'lg-dayhead' }, d, h('span', { class: 'lg-count', text: plural(perDay.get(d), 'thing', 'things') })), ul))
+        }
+        ul.append(logRow(e, awayDots !== null && e.at >= awayDots))
+      }
+      if (list.length > shown.length || (logBox && logBox.more)) {
+        body.push(h('div', { class: 'lg-more' }, h('button', { class: 'btn soft', 'data-fk': 'log:more', onclick: () => {
+          if (list.length > shown.length) logShow += 100
+          else send('logMore', { before: all[all.length - 1].id })
+          renderSafely()
+        } }, list.length > shown.length ? 'Show earlier entries' : 'Load older days')))
+      }
+    }
+    return [head, awayNotice(), all.length || (logBox && logBox.asking) ? filters : null, h('div', { class: 'lg-body' }, body),
+      h('p', { class: 'lg-foot', text: 'Kept for 30 days on this PC. Times are on this PC’s clock.' })]
+  }
+
+  function awayLines(a) {
+    const es = (a.entries || []).filter((e) => e && (e.until || e.at) >= a.from)
+    const lines = []
+    const chatsOf = (list) => [...new Set(list.map((e) => txt(e.chat)))]
+    const waiting = []
+    const settled = new Set()
+    for (const e of es) {
+      if (e.kind === 'continue' || e.kind === 'waitend') settled.add(e.chat)
+      if (e.kind === 'wait' && !settled.has(e.chat)) waiting.push(e)
+    }
+    const nc = chatsOf(es.filter((e) => e.kind === 'continue' && logWords(e).needs))
+    if (nc.length) lines.push({ warn: true, text: nc.length === 1 ? qt(nc[0]) + ' still needs you.' : plural(nc.length, 'chat', 'chats') + ' still need you' + (nc.length <= 3 ? ': ' + nc.map(qt).join(', ') : '') + '.' })
+    const stopped = chatsOf(es.filter((e) => e.kind === 'stop'))
+    if (stopped.length) lines.push({ text: plural(stopped.length, 'chat', 'chats') + ' stopped at limits' + (stopped.length <= 2 ? ': ' + stopped.map(qt).join(' and ') : '') + '.' })
+    const ac = es.filter((e) => e.kind === 'switch' && e.by === 'autocontinue' && !e.asked)
+    const cont = chatsOf(es.filter((e) => e.kind === 'continue' && !e.asked && !logWords(e).needs))
+    if (ac.length || cont.length) {
+      const first = ac.length ? (ac.length > 1 ? 'Auto-continue switched accounts ' + ac.length + ' times, the last to ' : 'Auto-continue switched to ') + who(ac[0], 'to') : ''
+      const second = cont.length ? (ac.length ? 'and ' : 'Auto-continue ') + 'continued ' + (cont.length === 1 ? '1 chat' : cont.length + ' chats') : ''
+      lines.push({ text: [first, second].filter(Boolean).join(' ') + '.' })
+    }
+    const early = es.filter((e) => e.kind === 'switch' && e.by === 'early' && !e.asked)
+    if (early.length) lines.push({ text: early.length === 1 ? 'Switched early from ' + who(early[0], 'from') + ' to ' + who(early[0], 'to') + '.' : 'Switched early ' + early.length + ' times, last to ' + who(early[0], 'to') + '.' })
+    if (waiting.length) lines.push({ text: waiting.length === 1 ? qt(waiting[0].chat) + ' is waiting for a limit to reset, until ' + clockText(waiting[0].resetAt) + '.' : plural(waiting.length, 'chat is', 'chats are') + ' waiting for a limit to reset.' })
+    const ph = es.filter((e) => e.kind === 'phone')
+    const phn = ph.reduce((n, e) => n + (e.count || 1), 0)
+    const phs = es.filter((e) => e.kind === 'phonestart')
+    if (phn || phs.length) {
+      const pc = chatsOf(ph)
+      lines.push({ text: [phn ? plural(phn, 'message', 'messages') + ' came from your phone' + (pc.length > 1 ? ', in ' + pc.length + ' chats' : '') : '',
+        phs.length ? plural(phs.length, 'chat was', 'chats were') + ' started from your phone' : ''].filter(Boolean).join('. ') + '.' })
+    }
+    const ka = es.filter((e) => e.kind === 'keepalive' && e.ok).length
+    if (ka) lines.push({ text: 'Keep alive started ' + plural(ka, 'new 5-hour window', 'new 5-hour windows') + '.' })
+    const ld = es.filter((e) => e.kind === 'lastday')
+    if (ld.length) lines.push({ text: ld.length === 1 ? poss(who(ld[0], 'accountLabel')) + ' main login swapped places with its pinning login.' : plural(ld.length, 'account swapped', 'accounts swapped') + ' its main login with its pinning login.' })
+    const seen = es.filter((e) => e.kind === 'switch' && e.by === 'seen')
+    if (seen.length) lines.push({ text: 'The account Claude Code uses was changed outside Switcher. It is now ' + who(seen[0], 'to') + '.' })
+    const ra = es.filter((e) => e.kind === 'roomagain')
+    if (ra.length) lines.push({ text: ra.length === 1 ? who(ra[0], 'accountLabel') + ' has room again.' : plural(ra.length, 'account has', 'accounts have') + ' room again.' })
+    if (lines.length > 6) { const rest = lines.length - 5; lines.length = 5; lines.push({ text: 'And ' + plural(rest, 'more thing', 'more things') + ' in the log.' }) }
+    return lines
+  }
+
+  function awayNotice() {
+    if (!away || away.hidden) return null
+    const lines = awayLines(away)
+    const dur = span(Math.max(1, (away.to || now()) - away.from))
+    const done = (open, dismissed) => {
+      away.hidden = true
+      if (dismissed) awayDots = null
+      send('awayDone', { dismissed })
+      if (open && view !== 'log') openLog()
+      else renderSafely()
+    }
+    return noticeEl({ tone: 'info', icon: 'history', cls: 'banner away', attrs: { role: 'region', 'aria-label': 'While you were away' },
+      body: h('div', { class: 'notice-text' }, h('strong', { text: 'While you were away (' + dur + ')' }),
+        lines.length ? h('ul', { class: 'away-list' }, lines.map((l) => h('li', { class: l.warn ? 'warn' : '', text: l.text })))
+          : h('div', { class: 'muted', text: 'Nothing needed you.' })),
+      buttons: [{ label: view === 'log' ? 'Got it' : 'See the full log', fk: 'away:open', onclick: () => done(true, false) },
+        { label: 'Dismiss', fk: 'away:dismiss', onclick: () => done(false, true) }] })
+  }
+
+  function drawLog() {
+    const had = app.contains(document.activeElement) ? keyOf(document.activeElement) : null
+    app.replaceChildren(...logPage().filter(Boolean))
+    if (had) {
+      const again = app.querySelector('[data-fk="' + CSS.escape(had) + '"], [data-menu="' + CSS.escape(had) + '"]')
+      if (again) again.focus({ preventScroll: true })
+    }
+    fitLogFilter()
+    reattachMenu()
+    rendered = true
+  }
+  function gotLog(msg) {
+    const list = Array.isArray(msg.entries) ? msg.entries.filter((e) => e && typeof e === 'object' && typeof e.at === 'number') : []
+    logBox = { entries: msg.older && logBox ? logBox.entries.concat(list) : list, more: !!msg.more, asking: false }
+    if (msg.older) logShow += 100
+    if (view === 'log') renderSafely()
+  }
+  function gotAway(a, open) {
+    away = a && Array.isArray(a.entries) && typeof a.from === 'number' ? { from: a.from, to: typeof a.to === 'number' ? a.to : null, entries: a.entries.filter((e) => e && typeof e.at === 'number'), hidden: false } : null
+    awayDots = away ? away.from : null
+    if (open === true && away) { away.hidden = true; if (view !== 'log') { openLog(); return } }
+    if (rendered && !stack.length) renderSafely()
+  }
+
+  function logButton() {
+    const n = state && state.logUnseen > 0 ? state.logUnseen : 0
+    return h('button', { class: 'btn ghost icon-only log-btn', 'data-fk': 'log', title: n ? 'Activity log: ' + plural(n, 'new entry', 'new entries') : 'Activity log',
+      'aria-label': n ? 'Activity log, ' + plural(n, 'new entry', 'new entries') : 'Activity log', onclick: openLog },
+    icon('history', 'sm'), n ? h('span', { class: 'log-dot', 'aria-hidden': 'true' }) : null)
+  }
+
   function render() {
     if (!state) return
     if (cvAnim) { cvPending = true; return }
@@ -2545,12 +2990,15 @@
     const s = state
     const updating = s.updating || busy.has('update')
     const accounts = s.accounts || []
+    if (view === 'log') { drawLog(); return }
 
     const toolbar = h('div', { class: 'toolbar' },
       h('button', { class: 'btn ghost icon-only', disabled: updating || null, 'data-fk': 'update', title: updating ? 'Updating…' : 'Update usage',
         'aria-label': updating ? 'Updating…' : 'Update usage', onclick: () => send('update', null, 'update') },
       icon('refresh', updating ? 'sm spin' : 'sm')),
       h('button', { class: 'btn primary', 'data-fk': 'add', onclick: () => send('add') }, icon('plus', 'sm'), 'Add account'),
+      logButton(),
+      phoneButton(),
       h('button', { class: 'btn ghost icon-only', 'data-menu': 'settings:x', title: 'Settings', 'aria-label': 'Settings',
         'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => toggleMenu('settings', 'x', e.currentTarget, e) }, icon('gear', 'sm')))
 
@@ -2559,9 +3007,10 @@
         ? h('header', { class: 'top' }, toolbar)
         : h('header', { class: 'top' },
           h('div', { class: 'top-text' }, h('h1', { text: 'Switcher for Claude Code' }),
-            h('p', { text: 'Switch Claude accounts in a click, or pin a chat or folder to an account of its own' })),
+            h('p', { text: 'Your AI, always ready: more accounts, fewer interruptions.' })),
           toolbar),
       ...banners(),
+      awayNotice(),
       thisChat(),
       checklistCard(),
       h('section', { class: 'accounts' },
@@ -2637,7 +3086,8 @@
     if (e.key === 'Escape') {
       if (tour) endTour()
       else if (stack.length) { e.preventDefault(); cancelPop(stack[stack.length - 1]) }
-      else closeMenu(true)
+      else if (menu) closeMenu(true)
+      else if (view === 'log') closeLog()
       return
     }
     if (tour && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) { tourGo(tour.at + (e.key === 'ArrowRight' ? 1 : -1)); return }
@@ -2668,6 +3118,8 @@
     if (msg && msg.type === 'note') { showNote(msg); return }
     if (msg && msg.type === 'noteDone') { dropNote(msg.id); return }
     if (msg && msg.type === 'ask') { showAsk(msg.id, msg.spec); return }
+    if (msg && msg.type === 'log') { gotLog(msg); return }
+    if (msg && msg.type === 'away') { gotAway(msg.away, msg.open === true); return }
     if (msg && msg.type === 'askDone') { const p = askPop(msg.id); if (p) settle(p, false); return }
     if (!msg || msg.type !== 'state') return
     const json = JSON.stringify(Object.assign({}, msg.state, { now: 0 }))
@@ -2684,17 +3136,16 @@
     for (const p of stack) if (p.refresh && !p.box.hidden) p.refresh()
     if (stack.length) return
     if (cvAnim) { cvPending = true; return }
+    if (view === 'log' && onlyFigures) return
     if (onlyFigures && rendered && patchMeters()) { tick(); return }
     renderSafely()
   })
 
   function renderSafely() {
     try { render() } catch (err) {
-      app.replaceChildren(h('div', { class: 'banner warn' }, icon('alert'),
-        h('div', { class: 'grow' }, h('strong', { text: 'This page couldn’t be drawn' }),
-          h('div', { class: 'muted', text: String((err && err.message) || err) })),
-        h('button', { class: 'btn primary sm', onclick: () => send('openConfig') }, 'Open Settings File'),
-        h('button', { class: 'btn ghost sm', onclick: () => send('status') }, 'Show Status')))
+      app.replaceChildren(noticeEl({ tone: 'warn', cls: 'banner', icon: 'alert',
+        body: [h('strong', { text: 'This page couldn’t be drawn' }), h('div', { class: 'muted', text: String((err && err.message) || err) })],
+        buttons: [{ label: 'Open Settings File', onclick: () => send('openConfig') }, { label: 'Show Status', onclick: () => send('status') }] }))
     }
   }
 

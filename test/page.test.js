@@ -60,6 +60,48 @@ check('innerHTML is used once, for the built-in SVG icons only', (js.match(/inne
   /span\.innerHTML = '<svg class="i '/.test(js))
 check('account names, emails and folders go in as text', /text: a\.label/.test(js) && /text: p\.folder/.test(js))
 check('no eval, no Function, no network', !/\beval\(|new Function|fetch\(|XMLHttpRequest|WebSocket/.test(js))
+console.log('\n-- the activity log --')
+const logBlock = js.slice(js.indexOf("let view = 'accounts'"), js.indexOf('function logButton'))
+const logCss = fs.readFileSync(path.join(__dirname, '..', 'media', 'accounts.css'), 'utf8')
+check('the log words every kind of entry the extension can send', ['switch', 'stop', 'wait', 'waitend', 'continue', 'phone', 'phonestart', 'keepalive', 'lastday', 'roomagain']
+  .every((k) => new RegExp("case '" + k + "'").test(logBlock)))
+check('chat titles, accounts and message words in the log go in as text', /text: w\.title/.test(logBlock) && /text: w\.why/.test(logBlock) &&
+  /text: w\.sub/.test(logBlock) && !/innerHTML/.test(logBlock))
+check('the away notice is drawn by noticeEl, so its buttons sit in a row under the words, at the right, like every notice',
+  /noticeEl\(\{ tone: 'info', icon: 'history', cls: 'banner away'/.test(js) && !/h\('(?:div|section)', \{ class: 'notice(?:[ ']|-actions)/.test(logBlock) &&
+  /\.notice-actions \{[^}]*justify-content: flex-end/.test(logCss))
+check('the log draws a few days at a time and asks for older ones', /logShow/.test(logBlock) && /send\('logMore'/.test(logBlock) && /content-visibility: auto/.test(logCss))
+check('the log has no subtitle under its title', !/What Switcher did, which chats stopped/.test(js))
+check('narrow, the log filters become one pill that opens a menu of the five filters, drawn as text',
+  (logBlock.match(/class: 'lg-chip lg-pill'/g) || []).length === 1 && /toggleMenu\('log-filter'/.test(logBlock) && /kind === 'log-filter' \? logFilterMenu\(\)/.test(js) &&
+  /function logFilterMenu[\s\S]*LOG_FILTERS\.map[\s\S]*role: 'menuitemradio'[\s\S]*aria-checked/.test(logBlock) && /function logFilterMenu[\s\S]*icon\('check'/.test(logBlock) &&
+  /'aria-haspopup': 'menu'/.test(logBlock) && !/innerHTML/.test(logBlock))
+check('the pill replaces the chips only when the one-row chips are wider than the room, measured', /chips\.offsetWidth > box\.clientWidth/.test(logBlock) &&
+  /fitLogFilter\(\)/.test(js.slice(js.indexOf('function drawLog()'))) && /\.lg-chips \{[^}]*flex-wrap: nowrap/.test(logCss) && /\.lg-filter\.pilled \.lg-chips \{[^}]*visibility: hidden/.test(logCss))
+{
+  const src = (js.match(/function gotAway\(a[^)]*\) \{[\s\S]*?\n  \}/) || [''])[0]
+  const make = () => {
+    const env = { away: null, awayDots: null, view: 'accounts', rendered: true, stack: [], opened: 0, drawn: 0,
+      openLog() { env.opened++; env.view = 'log' }, renderSafely() { env.drawn++ } }
+    const fn = src ? new Function('env', 'with (env) { ' + src + '; return gotAway }')(env) : () => {}
+    return { env, fn }
+  }
+  const payload = { from: 1000, to: 5000, entries: [{ at: 2000, kind: 'stop', chat: 'x' }] }
+  const a = make()
+  a.fn(payload)
+  check('the summary sent to a page (no notice before) is shown as a card, as before', a.env.away && a.env.away.hidden === false && a.env.opened === 0 && a.env.drawn === 1)
+  const b = make()
+  b.fn(payload, true)
+  check('"See the full log" pressed on the editor\'s notice goes straight to the log screen: no second card, the log opened once', !!b.env.away && b.env.away.hidden === true && b.env.opened === 1 && b.env.view === 'log')
+  check('and the entries since the absence keep their dots', b.env.awayDots === 1000)
+  const c = make()
+  c.env.view = 'log'
+  c.fn(payload, true)
+  check('with the log screen already open, nothing is opened again', c.env.opened === 0 && c.env.away.hidden === true)
+  check('the page tells the extension when the log screen is closed, and reads the open flag of the message',
+    /function closeLog\(\) \{[^}]*send\('logClose'\)/.test(js) && /gotAway\(msg\.away, msg\.open === true\)/.test(js))
+  check('a phone run that began before the absence and went on after it counts in the card, as in the notice', /\(e\.until \|\| e\.at\) >= a\.from/.test(js))
+}
 console.log('\n-- the update notices --')
 const updBlock = (js.match(/const u = s\.update[\s\S]*?\n    if \(s\.registryError\)/) || [''])[0]
 check('"Switcher X is available. You have Y." at the top of the page, before every other notice',
@@ -68,19 +110,18 @@ check('"Switcher X is available. You have Y." at the top of the page, before eve
 check('its notes go in as text, never as HTML or a link', /text: String\(u\.notes\)/.test(updBlock) && !/href|innerHTML|u\.url/.test(updBlock))
 check('already on disk: one quiet line, "Restart extensions to finish updating to X.", with no buttons',
   /u\.restart\) \{\s*(?:\/\/[^\n]*\n\s*)?out\.push\(h\('div', \{ class: 'muted upd-restart', text: 'Restart extensions to finish updating to ' \+ u\.version \+ '\.' \}\)\)\s*\} else if/.test(updBlock))
-check('three choices: Update, What\'s new, Later', ["choice: 'update' }) }, 'Update')", "choice: 'notes' }) }, 'What’s new')",
-  "choice: 'later' }) }, 'Later')"].every((s) => updBlock.includes(s)), updBlock.slice(0, 200))
+check('three choices: Update, What\'s new, Later', ["{ label: 'Update',", "{ label: 'What’s new',", "{ label: 'Later',", "choice: 'later' }) }"].every((s) => updBlock.includes(s)), updBlock.slice(0, 200))
 check('"Updated to X" with its headlines as text, See all changes and a close button',
   /text: 'Updated to ' \+ w\.version/.test(updBlock) && /h\('li', \{ text: t(, title: t)? \}\)/.test(updBlock) &&
-  updBlock.includes("choice: 'all' }) }, 'See all changes')") && updBlock.includes("choice: 'close' })"))
+  updBlock.includes("{ label: 'See all changes',") && updBlock.includes("choice: 'close' })") && /onClose:/.test(updBlock))
 check('not while the welcome dialog shows its own what\'s new', /w && typeof w\.version === 'string' && !s\.welcome/.test(updBlock))
 check('it never stores anything itself', !/localStorage|sessionStorage|indexedDB|setState\(/.test(js))
 const css = fs.readFileSync(path.join(__dirname, '..', 'media', 'accounts.css'), 'utf8')
-const noticeCls = ((updBlock.match(/class: '(banner [\w -]+)' \}, icon\('sparkle'\)/) || [])[1] || '').split(' ')
+const noticeCls = ((updBlock.match(/cls: '(banner [\w -]+)', icon: 'sparkle'/) || [])[1] || '').split(' ')
 const welcomeList = (js.match(/h\('ul', \{ class: '([\w-]+)' \}, items\.map/) || [])[1]
 check('the "Updated to" notice has a class of its own, not the one the welcome dialog\'s list is styled by',
   noticeCls.length === 2 && noticeCls[0] === 'banner' && !!welcomeList && !noticeCls.includes(welcomeList) &&
-  css.includes('.' + noticeCls[1]) && css.includes('.' + welcomeList + ' {'), noticeCls.join(' ') + ' / ' + welcomeList)
+  css.includes('.' + welcomeList + ' {'), noticeCls.join(' ') + ' / ' + welcomeList)
 check('the stylesheet loads nothing from outside', !/url\(\s*['"]?https?:/.test(css) && !/@import/.test(css))
 const durations = (css.match(/[\s,(](\d*\.?\d+)(m?s)\b/g) || [])
   .map((d) => d.trim().replace(/^[,(]/, '')).map((d) => d.endsWith('ms') ? parseFloat(d) : parseFloat(d) * 1000)
@@ -93,6 +134,32 @@ check('motion is switched off for people who ask for reduced motion', /prefers-r
 console.log('\n-- the design rules --')
 const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
   .map((m) => [m[1].trim(), m[2]])
+console.log('\n-- one element for every notice --')
+const noticeFn = (js.match(/function noticeEl\(o\) \{[\s\S]*?\n  \}\n/) || [''])[0]
+check('one builder, noticeEl, draws every notice', !!noticeFn && (js.match(/function noticeEl\(/g) || []).length === 1)
+check('no notice is built by hand: nothing makes an element with the class banner, note, alert, wait-strip or the old text and button classes',
+  !/h\('div', \{ class: '(?:banner|note(?!-stack)|alert|wait-strip|note-text|note-actions|banner-actions)\b/.test(js))
+check('the corner notices, the sign-in alert, the Reopen now strip, every notice at the top of the page and While you were away all call it',
+  (js.match(/noticeEl\(\{/g) || []).length === 13 && /noticeEl\(\{[^\n]*cls: 'note'/.test(js) && /noticeEl\(\{ tone: 'bad', cls: 'float alert'/.test(js) &&
+  /noticeEl\(\{ cls: 'inline wait-strip'/.test(js) && (js.match(/cls: 'banner/g) || []).length === 10)
+const stackFn = (js.match(/function usageNotes\(a\) \{[\s\S]*?\n  \}\n/) || [''])[0]
+check('the sign-in alert is a strip in the usage strips stack (last, nearest the toggles, no X); the Reopen now strip stays inline',
+  !!stackFn && stackFn.indexOf("cls: 'float alert'") > 0 && !/float alert[^\n]*onClose/.test(stackFn) && /showX \? strip\('u-extra'[\s\S]*,\n\s+signIn\)/.test(stackFn) &&
+  !/inline alert|stripRoom/.test(js) && /noticeEl\(\{ cls: 'inline wait-strip'/.test(js))
+check('an ended login keeps an empty room where its meters would be, so the stack of strips never reaches the header',
+  /h\('div', \{ class: 'strip-room' \+ \(extraShown\(a\) \? ' with-extra' : ''\)/.test(js) && /\.strip-room \{ flex: none; height: calc\(var\(--stack-h\) - 26px - var\(--card-gap\)\)/.test(css))
+check('the sign-in strip has the usage strips look (the 80% fill, black text, radius, shadow), 8px inside on every side, the same in the compact view, solid in high contrast',
+  /\.u-notes > \.notice\.float \{[^}]*padding: 8px;[^}]*box-shadow: 0 2px 8px[^}]*color: #000/.test(css) && !/compact-view[^{]*\.notice\.float/.test(css) &&
+  /vscode-high-contrast \.u-notes > \.notice\.float/.test(css) && !/\.btn\.signin-btn \.btn-text \{ display: none/.test(css))
+check('its buttons come after the text and the X, and the first one is primary',
+  noticeFn.indexOf('notice-body') < noticeFn.indexOf('notice-x') && noticeFn.indexOf('notice-x') < noticeFn.indexOf('notice-actions') &&
+  /i === 0 \? 'primary' : 'ghost'/.test(noticeFn))
+check('its text goes in as text', /text: String\(o\.text \|\| ''\)/.test(noticeFn) && !/innerHTML/.test(noticeFn))
+const ruleOf = (sel) => (rules.find((r) => r[0] === sel) || ['', ''])[1]
+check('the stylesheet puts the buttons on the second row, from the text to the right edge, aligned right',
+  /grid-row:\s*2/.test(ruleOf('.notice-actions')) && /grid-column:\s*2 \/ -1/.test(ruleOf('.notice-actions')) && /justify-content:\s*flex-end/.test(ruleOf('.notice-actions')))
+check('and the text on the first row', /grid-row:\s*1/.test(ruleOf('.notice-body')))
+check('the old separate button rows are gone from the stylesheet', !/banner-actions|note-actions|\.note-text|\.note-x|\.note > \.grow/.test(css))
 const borders = []
 for (const [sel, body] of rules) {
   for (const m of body.matchAll(/(?:^|;)\s*(border(?:-(?:top|right|bottom|left))?(?:-color)?)\s*:\s*([^;]+)/g)) {
@@ -229,6 +296,36 @@ const light = media('tab-light.svg'), dark = media('tab-dark.svg'), bar = media(
 check('the light-theme tab icon is dark, the dark-theme one is light', lum(stroke(light)) < 110 && lum(stroke(dark)) > 150)
 check('all three are the same drawing', light.replace(stroke(light), '') === dark.replace(stroke(dark), '') &&
   bar.replace(stroke(bar), '') === light.replace(stroke(light), ''))
+
+console.log('\n-- the phone button --')
+const pageJs = fs.readFileSync(path.join(root, 'media', 'accounts.js'), 'utf8')
+check('the phone button sits in the header beside the settings gear, and only when the extension sent the phone state',
+  /phoneButton\(\),\s*h\('button', \{ class: 'btn ghost icon-only', 'data-menu': 'settings:x'/.test(pageJs) && /if \(!state \|\| !state\.phone\) return null/.test(pageJs))
+check('its pop-up has Connect a phone, Get Awaydesk, Coming soon and the Mac and Linux line, and the action is the extension\'s to run',
+  ['Connect a phone', 'Get Awaydesk', 'Coming soon', 'Coming to Mac and Linux later.'].every((t) => pageJs.includes("'" + t + "'")) && pageJs.includes("send('phoneAction')") && pageJs.includes("send('phoneOpen')"))
+check('the page does no pairing of its own: no QR code, no device list, no connected dot', !/qrPicture|phone-dot|phoneDevices|phoneConnect|phoneReset/.test(pageJs))
+{
+  const extJs = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
+  const withArt = page.render({ ...base, awaydeskUri: 'https://file.test/media/awaydesk.jpg' })
+  check('the pop-up shows Awaydesk\'s picture: media/awaydesk.jpg is shipped, the extension gives the page its address, and the page draws it as an image',
+    fs.existsSync(path.join(root, 'media', 'awaydesk.jpg')) && /awaydeskUri: String\(webview\.asWebviewUri\(vscode\.Uri\.file\(path\.join\(mediaDir\(\), 'awaydesk\.jpg'\)\)\)\)/.test(extJs) &&
+    withArt.includes('window.__AWAYDESK__="https://file.test/media/awaydesk.jpg"') && /function phoneArt\(\)[\s\S]{0,400}h\('img', \{ src, alt: ''/.test(pageJs) &&
+    !/createElementNS\(NS, 'svg'\)[\s\S]{0,200}pa-/.test(pageJs))
+  check('without an address the page draws no picture and no empty box', page.render(base).includes('window.__AWAYDESK__=null') && /return src \? h\('div', \{ class: 'phone-art' \}/.test(pageJs))
+}
+
+console.log('\n-- the log: Open chat on a chat entry --')
+{
+  const m = /const openable = \(e\) => (\[[^\]]*\]\.includes\(e\.kind\) && [^\n]+)\n/.exec(pageJs)
+  const openable = m ? new Function('e', 'return ' + m[1]) : () => null
+  check('the page decides from the entry alone: a chat kind with a chat id gets the button', !!m && openable({ kind: 'stop', chatId: 'abc-123' }) === true &&
+    openable({ kind: 'continue', chatId: 'c1' }) === true && openable({ kind: 'phone', chatId: 'c1' }) === true && openable({ kind: 'wait', chatId: 'c1' }) === true)
+  check('an entry with no chat id, or not about a chat, or with an odd id, does not', openable({ kind: 'stop' }) === false && openable({ kind: 'switch', chatId: 'c1' }) === false &&
+    openable({ kind: 'stop', chatId: '../x y' }) === false && openable({ kind: 'keepalive', chatId: 'c1' }) === false)
+  check('the button says Open chat, uses the shared button styles, and sends only the chat id', /h\('button', \{ class: 'btn soft sm', 'data-fk': 'log:open:' \+ e\.id,/.test(pageJs) &&
+    pageJs.includes("send('openChat', { id: e.chatId })") && pageJs.includes("'Open chat'"))
+  check('it sits in the row (the tags line), not in the log\'s header or filters', /lg-tags' \}, tag, openable\(e\)/.test(pageJs) && !/openChat/.test(pageJs.slice(pageJs.indexOf('function logPage'), pageJs.indexOf('function logPage') + 1200)))
+}
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 assert.strictEqual(failed, 0, 'page tests failed')

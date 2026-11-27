@@ -35,6 +35,8 @@ const healthLib = require('./lib/health')
 const requestsLib = require('./lib/requests')
 const cardsLib = require('./lib/cards')
 const updatesLib = require('./lib/updates')
+const awaydeskLib = require('./lib/awaydesk')
+const activityLib = require('./lib/activity')
 
 const DEFAULT_NAME = store.DEFAULT_NAME
 const VIEW_ID = 'claudeswitcher.accountsView'
@@ -58,6 +60,47 @@ function log(msg) {
 function root() { return store.getRoot(vscode) }
 
 function labelOf(name) { return (name && store.displayOf(root(), name).label) || name }
+
+function logAct(entry, opts) {
+  try {
+    const id = activityLib.record(root(), entry, opts)
+    if (id) logChanged()
+    return id
+  } catch (e) { log('activity log: ' + (e && e.message)); return null }
+}
+
+function logFlush() {
+  try { if (activityLib.flush(root())) logChanged() } catch (e) { log('activity log: ' + (e && e.message)) }
+}
+
+function logActUpdate(key, patch) {
+  try { if (key && activityLib.update(root(), key, patch)) logChanged() } catch (e) { log('activity log: ' + (e && e.message)) }
+}
+
+let logOpenInPage = false
+function sendLog(older, before) {
+  try {
+    const r = activityLib.list(root(), before === undefined ? {} : { before })
+    for (const w of pageWebviews()) w.postMessage({ type: 'log', entries: r.entries, more: r.more, older: !!older }).then(() => {}, () => {})
+  } catch (e) { log('activity log: ' + (e && e.message)) }
+}
+function logChanged() {
+  if (logOpenInPage && pageOnScreen()) {
+    sendLog(false)
+    try { activityLib.markSeen(root()) } catch (e) { log('activity log: ' + (e && e.message)) }
+  }
+  postState()
+}
+
+function usedPercent(name, which) {
+  const row = snapshotRows().find((r) => r.name === name)
+  if (!row) return undefined
+  const p = (l) => (l && typeof l.percent === 'number' ? l.percent : null)
+  const s = p(row.session)
+  const w = which === 'session' ? null : p(row.weekly)
+  const m = which === 'weekly' ? (w === null ? -1 : w) : Math.max(s === null ? -1 : s, w === null ? -1 : w)
+  return m < 0 ? undefined : Math.round(m)
+}
 
 function byLabel(a, b) {
   return String(labelOf(a.name)).localeCompare(String(labelOf(b.name)), undefined, { numeric: true, sensitivity: 'base' })
@@ -311,11 +354,39 @@ function refreshAll() {
 let contextBar = null
 let contextCache = { chats: [], at: 0 }
 
+const phoneScanned = new Map()
+
+function scanPhone() {
+  try {
+    for (const c of contextCache.chats) {
+      let m
+      try { m = fs.statSync(c.file).mtimeMs } catch { continue }
+      if (phoneScanned.get(c.file) === m) continue
+      phoneScanned.set(c.file, m)
+      for (const rec of contextLib.tailRecords(c.file)) {
+        const p = activityLib.phoneIn(rec)
+        if (!p || Date.now() - p.at > activityLib.KEEP_MS || activityLib.hasKey(root(), activityLib.phoneKey(c.id, p.key))) continue
+        if (activityLib.recordPhone(root(), { chatId: c.id, chat: c.title, at: p.at, key: p.key, words: p.words })) logChanged()
+      }
+    }
+  } catch (e) { log('activity log (phone): ' + (e && e.message)) }
+}
+
 function refreshContext() {
   if (!editionLib.hasFeature(edition, 'context')) return
   try {
-    try { store.recordLive(root(), profilesLib.activeProfile(root()), undefined, 'seen') } catch {  }
+    try {
+      const prev = store.getLiveLog(root()).slice(-1)[0]
+      const now = profilesLib.activeProfile(root())
+      if (store.recordLive(root(), now, undefined, 'seen')) {
+        const at = (store.getLiveLog(root()).slice(-1)[0] || {}).at
+        logAct({ kind: 'switch', by: 'seen', from: prev && prev.name, fromLabel: prev && labelOf(prev.name), to: now, toLabel: labelOf(now) },
+          { key: 'seen:' + (prev ? prev.name : '') + '>' + now + ':' + at })
+      }
+    } catch {  }
     contextCache = { chats: contextLib.withFill(contextLib.recentChats({})), at: Date.now() }
+    logFlush()
+    scanPhone()
   } catch (e) { log('context: ' + (e && e.message)) }
   updateContextBar()
   postState()
@@ -697,6 +768,7 @@ async function roomBackCheck() {
     if (gs) await gs.update(ROOM_SEEN_KEY, seen)
     for (const f of tell) {
       log('room again: ' + f.name)
+      logAct({ kind: 'roomagain', accountLabel: labelOf(f.name) }, { key: 'roomagain:' + f.name + ':' + f.until })
       notify('info', labelOf(f.name) + ' has room again', 'Switch').then(async (v) => {
         if (v === 'Switch' && await confirmOrgSwitch(f.name)) await switchTo(f.name, { by: 'roomback' })
       }, () => {})
@@ -760,6 +832,9 @@ function handleStop(chat, stop, info, settings, now) {
     kind: stop.kind, resetAt, pinned: !!pinned, stoppedAt: stop.at || null, old,
     stillRunning: !!pinned && pinnedTo(chat) !== pinned, permissionMode: stop.permissionMode || null, state: 'new' }
   if (!autoLib.claim(root(), entry)) return
+  const askedMode = old || settings.mode === 'ask'
+  logAct({ kind: 'stop', chatId: chat.id, chat: chat.title, accountLabel: entry.account ? labelOf(entry.account) : undefined, limit: stop.kind, resetAt,
+    lateMs: old && stop.at ? now - stop.at : undefined, asked: askedMode }, { key: 'stop:' + entry.id })
   log('auto-continue: "' + chat.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] + (entry.account ? ' on "' + entry.account + '"' : '') +
     (old ? ' at ' + (stop.at ? new Date(stop.at).toISOString() : 'an unknown time') + ', too long ago to handle without asking' : ''))
   const canWait = !!resetAt && resetAt - Date.now() <= autoLib.MAX_WAIT_MS
@@ -771,13 +846,14 @@ function handleStop(chat, stop, info, settings, now) {
     const next = autoLib.nextAvailable(rows, { exclude: entry.account, stoppedAt: resetAt, kind: stop.kind, pick: settings.pick, order: settings.order })
     if (next && next.at - Date.now() <= autoLib.MAX_WAIT_MS) {
       const other = next.name !== entry.account ? next.name : null
-      autoLib.mark(root(), entry.id, { resetAt: next.at, to: other })
-      waitForReset({ ...entry, resetAt: next.at, to: other }, 'No account has room now, so it')
+      autoLib.mark(root(), entry.id, { resetAt: next.at, to: other, noRoom: true })
+      waitForReset({ ...entry, resetAt: next.at, to: other, noRoom: true }, 'No account has room now, so it')
       return
     }
   }
   if (canWait) { waitForReset(entry, 'It'); return }
   autoLib.mark(root(), entry.id, { state: 'skipped' })
+  logAct({ kind: 'waitend', chatId: entry.chat, chat: entry.title, how: 'skipped', resetAt }, { key: 'waitend:' + entry.id + ':skipped' })
   notify('info', '"' + entry.title + '" stopped at its ' + LIMIT_WORDS[stop.kind] +
     ', which resets too far ahead to wait for, and no other account has room.')
 }
@@ -798,18 +874,21 @@ function askAbout(entry, to, canWait, opts) {
     (entry.pinned ? (entry.stillRunning ? ' It still runs on ' + labelOf(entry.account) + '\'s pinning login until it\'s reopened, so it stays on that account.'
       : ' It\'s pinned to ' + labelOf(entry.account) + ', so it stays on that account.') : '')
   notify('info', what, ...[HERE, SWITCH, WAIT, 'Settings'].filter(Boolean)).then((pick) => {
-    if (pick && pick === HERE) deliverNotice(entry.id, 'reset')
-    else if (pick && pick === SWITCH) switchAndContinue(entry, to)
-    else if (pick && pick === WAIT) waitForReset(entry, 'It')
+    if (pick && pick === HERE) { autoLib.mark(root(), entry.id, { asked: true }); deliverNotice(entry.id, 'reset') }
+    else if (pick && pick === SWITCH) switchAndContinue({ ...entry, asked: true }, to)
+    else if (pick && pick === WAIT) waitForReset({ ...entry, asked: true }, 'It')
     else {
       autoLib.mark(root(), entry.id, { state: 'skipped' })
+      logAct({ kind: 'waitend', chatId: entry.chat, chat: entry.title, how: 'declined', resetAt: entry.resetAt }, { key: 'waitend:' + entry.id + ':declined' })
       if (pick === 'Settings') openAccounts()
     }
   }, () => {})
 }
 
 function waitForReset(entry, subject) {
-  autoLib.mark(root(), entry.id, { state: 'waiting' })
+  autoLib.mark(root(), entry.id, entry.asked ? { state: 'waiting', asked: true } : { state: 'waiting' })
+  logAct({ kind: 'wait', chatId: entry.chat, chat: entry.title, accountLabel: entry.account ? labelOf(entry.account) : undefined, resetAt: entry.resetAt,
+    toLabel: entry.to ? labelOf(entry.to) : undefined, asked: !!entry.asked }, { key: 'wait:' + entry.id + ':' + entry.resetAt })
   postState()
   notify('info', subject + ' will continue "' + entry.title + '" at ' + clockText(entry.resetAt) +
     (entry.to ? ' on ' + labelOf(entry.to) + ', the first account with room again.' : ', when the limit resets.'), 'Cancel').then((pick) => {
@@ -826,6 +905,7 @@ function dropWait(id, e) {
     return true
   })
   if (!mine) return
+  logAct({ kind: 'waitend', chatId: e.chat, chat: e.title, how: carried ? 'moved' : 'off', resetAt: e.resetAt }, { key: 'waitend:' + id + ':' + (carried ? 'moved' : 'off') })
   postState()
   log('auto-continue: "' + e.title + '" was due to continue' + (e.to ? ' on "' + e.to + '"' : '') +
     ', but auto-continue is set to Do nothing' + (carried ? ' (and it has carried on since)' : '') + '; not continued')
@@ -841,7 +921,11 @@ function cancelWait(entry) {
     s.stops[entry.id] = { ...cur, state: 'cancelled' }
     return true
   })
-  if (cancelled) { postState(); return }
+  if (cancelled) {
+    logAct({ kind: 'waitend', chatId: entry.chat, chat: entry.title, how: 'cancelled', resetAt: entry.resetAt }, { key: 'waitend:' + entry.id + ':cancelled' })
+    postState()
+    return
+  }
   if (cancelled === false) { log('auto-continue: Cancel on "' + entry.title + '" came after its wait was over; nothing to cancel'); return }
   log('auto-continue: Cancel on "' + entry.title + '": auto-continue was busy; not cancelled')
   notify('warn', 'Switcher couldn\'t cancel continuing "' + entry.title + '" just now (busy).', 'Try again').then((pick) => {
@@ -853,18 +937,21 @@ async function switchAndContinue(entry, to) {
   const mine = autoLib.updateState(root(), (s) => {
     const cur = s.stops[entry.id]
     if (!cur || !['new', 'asked', 'waiting'].includes(cur.state)) return false
-    s.stops[entry.id] = { ...cur, state: 'switching', to }
+    s.stops[entry.id] = entry.asked ? { ...cur, state: 'switching', to, asked: true } : { ...cur, state: 'switching', to }
     return true
   })
   if (!mine) return
   if (entry.file && !autoLib.limitStop(entry.file)) {
     autoLib.mark(root(), entry.id, { state: 'moved' })
+    logAct({ kind: 'waitend', chatId: entry.chat, chat: entry.title, how: 'moved', resetAt: entry.resetAt }, { key: 'waitend:' + entry.id + ':moved' })
     postState()
     log('auto-continue: "' + entry.title + '" carried on before the switch to "' + to + '"; not switched')
     notify('info', '"' + entry.title + '" has carried on since it stopped, so Switcher for Claude Code didn\'t switch to ' + labelOf(to) + '.')
     return
   }
-  try { await switchTo(to, { quiet: true, by: 'autocontinue' }) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
+  const facts = { chat: entry.title, limit: entry.kind, resetAt: entry.resetAt, toUsed: usedPercent(to), pick: store.getAutoContinue(root()).pick,
+    waited: !!entry.noRoom, asked: !!entry.asked }
+  try { await switchTo(to, { quiet: true, by: 'autocontinue', activity: facts }) } catch (e) { log('auto-continue switch: ' + (e && e.message)) }
   if (profilesLib.activeProfile(root()) !== to) {
     autoLib.mark(root(), entry.id, { state: 'failed' })
     notify('warn', "Couldn't switch to \"" + labelOf(to) + '", so "' + entry.title + "\" wasn't continued.")
@@ -882,11 +969,20 @@ async function deliverNotice(id, how, opts) {
   if (!e) return
   if (!o.again) {
     const stop = autoLib.limitStop(e.file)
-    if (!stop) { autoLib.mark(root(), id, { state: 'moved' }); postState(); return }
+    if (!stop) {
+      autoLib.mark(root(), id, { state: 'moved' })
+      logAct({ kind: 'waitend', chatId: e.chat, chat: e.title, how: 'moved', resetAt: e.resetAt }, { key: 'waitend:' + id + ':moved' })
+      postState()
+      return
+    }
   }
+  const whose = how === 'reset' && e.account && (e.pinned || !e.to) ? e.account : profilesLib.activeProfile(root())
+  const logContinue = (outcome, key) => logAct({ kind: 'continue', chatId: e.chat, chat: e.title, how, accountLabel: labelOf(whose),
+    stoppedAt: e.stoppedAt || undefined, asked: !!(e.asked || o.asked), outcome }, { key })
   const info = contextLib.sessionInfo(e.chat)
   if (!info || !info.inbox || !info.name) {
     autoLib.mark(root(), id, { state: 'closed' })
+    logContinue('closed', 'continue:' + id + ':closed')
     postState()
     notify('info', '"' + e.title + '" was closed, so it couldn\'t be continued.', 'Open Chat')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
@@ -900,6 +996,7 @@ async function deliverNotice(id, how, opts) {
   })) return
   if (!autoLib.canReceive(e.permissionMode)) {
     autoLib.mark(root(), id, { state: 'manual' })
+    logContinue('manual', 'continue:' + id + ':manual:' + Date.now())
     postState()
     notify('info', (how === 'switched' ? '' : 'The limit has reset. ') + '"' + e.title + '" skips permission prompts, so it only takes "continue" from you.', 'Open Chat')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
@@ -907,10 +1004,14 @@ async function deliverNotice(id, how, opts) {
   }
   const res = await (handoffRun || autoLib.send)(info.name, autoLib.noticeFor({ kind: e.kind }, how))
   if (res && res.ok) {
-    autoLib.mark(root(), id, { state: 'sent', sentAt: Date.now(), name: info.name })
+    const sentAt = Date.now()
+    const logKey = 'continue:' + id + ':' + how + ':' + sentAt
+    autoLib.mark(root(), id, { state: 'sent', sentAt, name: info.name, logKey })
+    logContinue('sent', logKey)
     log('auto-continue: sent "' + e.title + '" its notice (' + how + ')')
   } else {
     autoLib.mark(root(), id, { state: 'failed' })
+    logContinue('failed', 'continue:' + id + ':failed:' + Date.now())
     log('auto-continue: sending failed: ' + (res && res.reason))
     notify('warn', "Couldn't continue \"" + e.title + '" automatically: ' + ((res && res.reason) || 'the notice wasn\'t sent') + '.',
       'Continue Now').then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
@@ -925,12 +1026,14 @@ function followUp(id, e) {
     if (info && info.status === 'busy') return
     if (Date.now() - (e.sentAt || 0) < 5 * 60e3) return
     autoLib.mark(root(), id, { state: 'failed' })
+    logActUpdate(e.logKey, { outcome: 'failed' })
     notify('warn', '"' + e.title + '" didn\'t pick up the notice to continue.', 'Continue Now')
       .then((p) => { if (p) openChat(e.chat, 'continue') }, () => {})
     return
   }
   if (outcome === 'replied' && info && info.status === 'busy') return
   autoLib.mark(root(), id, { state: outcome })
+  logActUpdate(e.logKey, { outcome })
   if (outcome === 'continued') {
     log('auto-continue: "' + e.title + '" continued')
     notify('info', 'Continued "' + e.title + '" after its usage limit.')
@@ -970,12 +1073,14 @@ async function keepAliveTick() {
         ? await kickoffLib.runLive(keepAliveRun || undefined)
         : await kickoffLib.startSession(root(), name, { renew: trackerLib.renew, run: kickoffRun || undefined })
       log('keep alive: ' + (res && res.ok ? 'started the next 5-hour session for "' + name + '"' : '"' + name + '" failed: ' + (res && res.reason)))
+      logAct({ kind: 'keepalive', accountLabel: labelOf(name), ok: !!(res && res.ok) }, { key: 'keepalive:' + name + ':' + Date.now() })
       if (res && res.ok) {
         if (live) await refreshLiveQuietly()
         else { try { await trackerLib.poll(root(), name, { force: true }) } catch (e) { log('usage after keep alive: ' + (e && e.message)) } }
       }
     } catch (e) {
       log('keep alive "' + name + '": ' + (e && e.message))
+      logAct({ kind: 'keepalive', accountLabel: labelOf(name), ok: false }, { key: 'keepalive:' + name + ':' + Date.now() })
     } finally {
       keepAliveBusy.delete(name)
       refreshAll()
@@ -1043,18 +1148,19 @@ function earlySwitchCheck() {
   if (!mine) return
   const what = labelOf(live) + ' reached ' + Math.round(lim.percent) + '% of its ' + (why === 'weekly' ? 'weekly limit' : '5-hour limit')
   log('early switch: ' + what + '; next is "' + to + '"')
+  const facts = { limit: why, fromUsed: Math.round(lim.percent), threshold: why === 'weekly' ? undefined : st.early, toUsed: usedPercent(to, why === 'weekly' ? 'weekly' : 'session') }
   if (st.mode === 'ask') {
     notify('info', what + '. Switch to ' + labelOf(to) + ' now, so work doesn\'t stop?', 'Switch Now', 'Not Now')
-      .then((p) => { if (p === 'Switch Now') earlySwitch(live, to, what) }, () => {})
+      .then((p) => { if (p === 'Switch Now') earlySwitch(live, to, what, { ...facts, asked: true }) }, () => {})
     return
   }
-  earlySwitch(live, to, what)
+  earlySwitch(live, to, what, facts)
 }
 
-async function earlySwitch(from, to, what) {
+async function earlySwitch(from, to, what, facts) {
   earlyBusy = true
   try {
-    try { await switchTo(to, { quiet: true, by: 'early' }) } catch (e) { log('early switch: ' + (e && e.message)) }
+    try { await switchTo(to, { quiet: true, by: 'early', activity: facts }) } catch (e) { log('early switch: ' + (e && e.message)) }
     if (profilesLib.activeProfile(root()) !== to) {
       notify('warn', "Couldn't switch to \"" + labelOf(to) + '" early. ' + what + '.')
       return
@@ -1632,7 +1738,8 @@ async function doSwitch(name, opts) {
   let applied
   try {
     const by = (opts && opts.by) || 'command'
-    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, by, withoutSaving: true, skipClaudeCache: claudeCacheMixed() })
+    const res = await switchLib.switchAccount(root(), pick.name, { lock: lockAccounts, log, by, withoutSaving: true, skipClaudeCache: claudeCacheMixed(),
+      activity: opts && opts.activity })
     if (!res.switched) {
       notify('info', 'Already signed in as "' + labelOf(pick.name) + '".')
       return
@@ -2205,6 +2312,7 @@ async function lastDayExchange(name) {
   const x = await loginsLib.exchange(root(), name, { active })
   if (!x.ok) { log('last-day exchange for "' + name + '": ' + x.reason); return }
   log('last-day exchange for "' + name + '"')
+  logAct({ kind: 'lastday', accountLabel: labelOf(name) }, { key: 'lastday:' + name + ':' + x.pinning.expiresAt })
   try {
     let st = loginsLib.readReminderState(root())
     for (const kind of ['3-days', 'last-day']) {
@@ -3691,8 +3799,13 @@ function pageHtml(webview, layout) {
     jsUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'accounts.js')))),
     fontUri: cd ? String(webview.asWebviewUri(vscode.Uri.file(path.join(cd, 'codicon.ttf')))) : null,
     logoUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'icon.png')))),
+    awaydeskUri: String(webview.asWebviewUri(vscode.Uri.file(path.join(mediaDir(), 'awaydesk.jpg')))),
     layout,
   })
+}
+
+function safeUnseen() {
+  try { return activityLib.unseen(root()) } catch { return 0 }
 }
 
 function pageState() {
@@ -3708,6 +3821,7 @@ function pageState() {
 
   return {
     now: Date.now(),
+    logUnseen: safeUnseen(),
     registryError: store.registryError(root()),
     duplicates: profilesLib.duplicates(root()).map((g) => g.map(labelOf)),
     edition,
@@ -3779,6 +3893,7 @@ function pageState() {
     checklist: checklistState(),
     update: updateNotice,
     whatsNew: whatsNewState(),
+    phone: phoneState(),
   }
 }
 
@@ -3787,6 +3902,40 @@ function autoContinueState() {
     .filter(([, e]) => e.state === 'waiting' && e.resetAt)
     .map(([id, e]) => ({ id, title: String(e.title || 'A chat').slice(0, 60), at: clockText(e.resetAt), on: e.to ? labelOf(e.to) : null }))
   return { ...store.getAutoContinue(root()), waiting }
+}
+
+const AWAY_BEAT_MS = 60 * 1000
+
+function windowPresent() {
+  const st = vscode.window.state
+  return !!(st && st.focused && st.active !== false)
+}
+
+function awayTick() {
+  logFlush()
+  try {
+    if (!windowPresent()) return
+    const back = activityLib.comeBack(root(), Date.now())
+    if (back) showAway(back)
+  } catch (e) { log('while you were away: ' + (e && e.message)) }
+}
+
+function showAway(back) {
+  const entries = activityLib.awayEntries(activityLib.since(root(), back.from, back.to))
+  if (!activityLib.awayLines(entries, clockText).length) return
+  log('while you were away: ' + entries.length + ' entries since ' + new Date(back.from).toISOString())
+  if (pageOnScreen()) {
+    const away = { from: back.from, to: back.to, entries }
+    for (const w of pageWebviews()) w.postMessage({ type: 'away', away }).then(() => {}, () => {})
+    return
+  }
+  notify('info', activityLib.awayText(entries, back.from, back.to, clockText), 'See the full log', 'Dismiss').then(async (pick) => {
+    try { activityLib.markSeen(root()) } catch {  }
+    if (pick !== 'See the full log') { postState(); return }
+    await openAccounts()
+    const away = { from: back.from, to: back.to, entries }
+    for (const w of pageWebviews()) w.postMessage({ type: 'away', away, open: true }).then(() => {}, () => {})
+  }, () => {})
 }
 
 function postState() {
@@ -3868,6 +4017,44 @@ async function updateChoice(choice) {
       log('update: ' + r.done + (r.reason ? ' (' + r.reason + ')' : ''))
       notify(r.done === 'installed' ? 'info' : 'warn', r.message)
     } finally { updateBusy = false }
+  }
+}
+
+let phoneChecking = false
+let phoneRequest = null
+let phonePlatform = null
+let phoneAppName = null
+const phoneMemory = {}
+
+function awaydeskInstalled() {
+  try { return !!(vscode.extensions && vscode.extensions.getExtension(awaydeskLib.EXTENSION_ID)) } catch { return false }
+}
+function phoneStore() { try { return awaydeskLib.storeFor(phoneAppName || vscode.env.appName) } catch { return 'openvsx' } }
+
+function phoneState() {
+  let listed = false
+  try { listed = checkUpdatesOn() && awaydeskLib.savedListed(root(), phoneStore()) } catch { listed = false }
+  return { mode: awaydeskLib.modeFor({ installed: awaydeskInstalled(), platform: phonePlatform || process.platform, listed }), checking: phoneChecking }
+}
+
+async function phoneOpened() {
+  if (phoneChecking || awaydeskInstalled() || (phonePlatform || process.platform) !== 'win32' || !checkUpdatesOn()) return
+  phoneChecking = true
+  postState()
+  try {
+    await awaydeskLib.check(root(), phoneStore(), true, { request: phoneRequest || undefined, log, memory: phoneMemory })
+  } catch (e) { log('Awaydesk store check: ' + (e && e.message)) } finally { phoneChecking = false }
+  postState()
+}
+
+async function phoneAction() {
+  const mode = phoneState().mode
+  try {
+    if (mode === 'connect') await vscode.commands.executeCommand(awaydeskLib.PAIR_COMMAND)
+    else if (mode === 'get') await vscode.commands.executeCommand(awaydeskLib.OPEN_COMMAND, awaydeskLib.EXTENSION_ID)
+  } catch (e) {
+    log('phone: ' + (e && e.message))
+    notify('warn', mode === 'connect' ? 'Awaydesk could not start connecting a phone.' : 'The Extensions view could not open Awaydesk.')
   }
 }
 
@@ -4064,6 +4251,30 @@ function endNote(id, label) {
 
 const PAGE_ACTIONS = {
   ready: () => { postState(); postAsks() },
+  logOpen: () => {
+    logOpenInPage = true
+    try { activityLib.markSeen(root()) } catch (e) { log('activity log: ' + (e && e.message)) }
+    sendLog(false)
+    postState()
+  },
+  openChat: (m) => {
+    const id = typeof m.id === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(m.id) ? m.id : null
+    if (!id) return
+    Promise.resolve(vscode.commands.executeCommand('claude-vscode.primaryEditor.open', id)).then(() => {}, (e) => {
+      log('open chat: ' + (e && e.message))
+      notify('warn', "Couldn't open that chat. It may have been deleted, or Claude Code isn't available in this editor.")
+    })
+  },
+  logClose: () => { logOpenInPage = false },
+  logMore: (m) => { if (typeof m.before === 'string') sendLog(true, m.before) },
+  logClear: () => {
+    try { activityLib.clear(root()) } catch (e) { log('activity log: ' + (e && e.message)) }
+    postState()
+  },
+  awayDone: () => {
+    try { activityLib.markSeen(root()) } catch (e) { log('activity log: ' + (e && e.message)) }
+    postState()
+  },
   note: (m) => endNote(m.id, m.label),
   answer: (m) => {
     const a = asks.get(m.id)
@@ -4098,6 +4309,8 @@ const PAGE_ACTIONS = {
   },
   learnMore: () => { vscode.env.openExternal(vscode.Uri.parse(PRESERVED_THINKING_URL)) },
   updateChoice: (m) => updateChoice(m.choice),
+  phoneOpen: () => phoneOpened(),
+  phoneAction: () => phoneAction(),
   whatsNewChoice: (m) => whatsNewChoice(m.choice),
   welcomeDone: () => {
     if (version) { try { updatesLib.seenWhatsNew(root(), version) } catch {  } }
@@ -4148,7 +4361,9 @@ const PAGE_ACTIONS = {
   },
   cancelContinue: (m) => {
     if (typeof m.id !== 'string' || m.id.length > 200) return
-    autoLib.updateState(root(), (s) => { if (s.stops[m.id] && s.stops[m.id].state === 'waiting') s.stops[m.id].state = 'cancelled' })
+    let was = null
+    autoLib.updateState(root(), (s) => { if (s.stops[m.id] && s.stops[m.id].state === 'waiting') { was = { ...s.stops[m.id] }; s.stops[m.id].state = 'cancelled' } })
+    if (was) logAct({ kind: 'waitend', chatId: was.chat, chat: was.title, how: 'cancelled', resetAt: was.resetAt }, { key: 'waitend:' + m.id + ':cancelled' })
   },
   pin: (m) => pinFolder(m.name),
   unpin: (m) => unpinFolder(m.folder),
@@ -4387,7 +4602,12 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => clearInterval(usageTimer) })
   context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => {
     if (s.focused) { updateUsageBar(); refreshContext() }
+    if (s.focused && s.active !== false) awayTick()
   }))
+  const awayTimer = setInterval(awayTick, AWAY_BEAT_MS)
+  if (awayTimer.unref) awayTimer.unref()
+  context.subscriptions.push({ dispose: () => clearInterval(awayTimer) })
+  awayTick()
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('claudeswitcher.trackAllAccounts')) { refreshAll(); trackerTick() }
     if (e.affectsConfiguration('claudeswitcher')) { updateStatusBar(); updateUsageBar(); postState() }
@@ -4456,6 +4676,9 @@ module.exports = {
     setUpdateRequest: (fn) => { updateRequest = fn || null },
     setExtensionsList: (file) => { extensionsListOverride = file || null },
     clearUpdateMemory: () => { delete updateMemory.askedAt },
+    setPhoneRequest: (fn) => { phoneRequest = fn || null },
+    setPhonePlatform: (platform, appName) => { phonePlatform = platform || null; phoneAppName = appName || null },
+    clearPhoneMemory: () => { for (const k of Object.keys(phoneMemory)) delete phoneMemory[k] },
     updateTick, refreshUpdateNotice, updateChoice, whatsNewChoice, updateNoticeNow: () => updateNotice,
     setLoginAuto: (on) => { loginAuto = !!on },
     dropSigninDir,
@@ -4475,7 +4698,8 @@ module.exports = {
     setKickoffRun: (fn) => { kickoffRun = fn },
     setHandoffRun: (fn) => { handoffRun = fn },
     setKeepAliveRun: (fn) => { keepAliveRun = fn },
-    checkLimits, keepAliveTick, refreshContext, roomBackCheck, prefOf, setPref,
+    checkLimits, keepAliveTick, refreshContext, roomBackCheck, prefOf, setPref, awayTick, showAway, scanPhone,
+    resetPhoneScan: () => phoneScanned.clear(),
     roomReset: () => { for (const k of Object.keys(roomWaiting)) delete roomWaiting[k]; roomPolled.clear(); roomTold.clear() },
     setLiveUsageRun: (fn) => { liveUsageRun = fn },
     pollLiveUsage, earlySwitchCheck,

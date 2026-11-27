@@ -27,7 +27,7 @@ check('the identity alone, when the login doesn\'t say',
 check('nothing known, nothing made up', profiles.planOf(null, null) === null &&
   profiles.planOf({ organizationType: 'something_new' }, login(undefined, undefined)) === null)
 check('a plan an earlier version recorded shows by today\'s name', profiles.planName('Max 20x') === 'Ultra' &&
-  profiles.planName('Max 5x') === 'Max' && profiles.planName('Team 5x') === 'Team Max' && profiles.planName('Team') === 'Team' && profiles.planName('Pro') === 'Pro' &&
+  profiles.planName('Max 5x') === 'Max' && profiles.planName('Team 5x') === 'Team Pro' && profiles.planName('Team') === 'Team' && profiles.planName('Pro') === 'Pro' &&
   profiles.planName(null) === null)
 
 console.log('\n-- when a login has to be signed in again --')

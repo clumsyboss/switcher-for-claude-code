@@ -792,6 +792,7 @@ async function main() {
 
   console.log('\n-- auto-continue: a chat stopped at a usage limit --')
   const autoLib = require('../lib/autocontinue.js')
+  const actLib = require('../lib/activity.js')
   const settleNotes = () => new Promise((r) => setTimeout(r, 20))
   check('on by default, asking first', (ext._test.pageState().autoContinue || {}).mode === 'ask' &&
     ext._test.pageState().features.autoContinue === true && ext._test.pageState().features.keepAlive === true)
@@ -1286,6 +1287,7 @@ async function main() {
     await ext._test.roomBackCheck()
     await ext._test.roomBackCheck()
     check('once per reset', roomMsgs(mk).length === 1)
+    check('"has room again" shown is logged once, with the account', actLib.list(TEST_ROOT, { limit: 500 }).entries.filter((e) => e.kind === 'roomagain').length === 1)
     ext._test.roomReset()
     usedUp(5 * 60e3)
     await ext._test.roomBackCheck()
@@ -1394,6 +1396,358 @@ async function main() {
   fs.rmSync(LREC, { force: true })
   ext._test.refreshContext()
 
+  console.log('\n-- 1.5.4: the activity log --')
+  const acts = () => actLib.list(TEST_ROOT, { limit: 500 }).entries
+  const actSince = (t) => acts().filter((e) => e.at >= t - 1000)
+  const lbl = (n) => store.displayOf(TEST_ROOT, n).label
+  const logHome = profiles.activeProfile(TEST_ROOT)
+  fs.mkdirSync(LPROJ, { recursive: true })
+  fs.mkdirSync(SESSIONS, { recursive: true })
+  ext._test.setHandoffRun(async (name, msg) => { sentNotices.push({ name, msg }); return { ok: true } })
+  actLib.clear(TEST_ROOT)
+  {
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'room', order: [], early: null })
+    liveFigures(100); eveUsage(12, 20); liveSession('idle')
+    let t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-s1')]))
+    ext._test.refreshContext()
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('log-s1') === 'sent', 60000)
+    const es = actSince(t0)
+    const stopE = es.find((e) => e.kind === 'stop')
+    check('a chat stopped at a limit is logged once, with its chat, account, limit and reset time, and a way to open it',
+      es.filter((e) => e.kind === 'stop').length === 1 && stopE.chat === 'Fix the tests' && stopE.limit === 'session' && typeof stopE.resetAt === 'number' && stopE.chatId === LSID && !stopE.asked && !stopE.lateMs, JSON.stringify(stopE))
+    const swE = es.find((e) => e.kind === 'switch' && e.by === 'autocontinue')
+    check('Auto-continue\'s switch says the chat, the limit, the reset, how much room the account had and the rule that chose it',
+      !!swE && swE.from === logHome && swE.to === 'eve' && swE.chat === 'Fix the tests' && swE.limit === 'session' && typeof swE.resetAt === 'number' &&
+      swE.toUsed === 20 && swE.pick === 'room' && !swE.asked && !swE.waited && swE.toLabel === lbl('eve'), JSON.stringify(swE))
+    const coE = es.find((e) => e.kind === 'continue')
+    check('and the notice to the chat: when, on which account, since when it was stopped; not chosen by the person',
+      !!coE && coE.how === 'switched' && coE.accountLabel === lbl('eve') && typeof coE.stoppedAt === 'number' && !coE.asked && coE.outcome === 'sent', JSON.stringify(coE))
+    autoLib.mark(TEST_ROOT, 'log-s1', { sentAt: Date.now() - 60e3 })
+    addToChat([peerNotice(), { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', id: 'tu-log1', name: 'Bash', input: {} }] } }])
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    check('what the chat did with the notice is filled in on the same entry', actSince(t0).filter((e) => e.kind === 'continue').length === 1 &&
+      actSince(t0).find((e) => e.kind === 'continue').outcome === 'continued')
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+    const pg = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'page')
+    check('a switch on the page is logged as yours, from and to', !!pg && pg.from === 'eve' && pg.to === logHome && pg.fromLabel === lbl('eve'), JSON.stringify(pg))
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'ask' })
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-a1')]))
+    ext._test.refreshContext()
+    q.info.push('Switch to ' + lbl('eve') + ' and Continue')
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('log-a1') === 'sent', 60000)
+    const ea = actSince(t0)
+    check('Ask mode: the stop says it asked', ea.find((e) => e.kind === 'stop').asked === true)
+    check('Ask mode: pressing "Switch to X and Continue" is logged as the person\'s choice, not automatic',
+      ea.find((e) => e.kind === 'switch' && e.by === 'autocontinue').asked === true && ea.find((e) => e.kind === 'continue').asked === true,
+      JSON.stringify(ea.map((e) => [e.kind, e.by, e.asked])))
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-a2')]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    await tick()
+    check('Ask mode, the question closed with no choice: "left stopped, you didn\'t pick"', actSince(t0).some((e) => e.kind === 'waitend' && e.how === 'declined' && e.chatId === LSID))
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-w1', Date.now() + 3 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    const wE = actSince(t0).find((e) => e.kind === 'wait')
+    check('a wait is logged with the chat, account and time, set by the Switcher', !!wE && wE.chat === 'Fix the tests' && typeof wE.resetAt === 'number' && !wE.asked && !wE.toLabel, JSON.stringify(wE))
+    await ext._test.onPageMessage({ type: 'cancelContinue', id: 'log-w1' })
+    check('cancelling it is logged', actSince(t0).some((e) => e.kind === 'waitend' && e.how === 'cancelled'))
+    writeChat(startOf().concat([stopRec('log-w2', Date.now() + 3 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    autoLib.mark(TEST_ROOT, 'log-w2', { resetAt: Date.now() - 61e3 })
+    store.setAutoContinue(TEST_ROOT, { mode: 'off' })
+    await ext._test.checkLimits()
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'] })
+    check('a wait that came due with auto-continue off is logged as not continued', actSince(t0).some((e) => e.kind === 'waitend' && e.how === 'off'))
+
+    liveFigures(100)
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [{ kind: 'session', percent: 100, resets_at: inHours(0.5) }, { kind: 'weekly_all', percent: 10, resets_at: inHours(100) }] }, Date.now())
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-n', Date.now() + 3 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    check('no room anywhere: the wait names the account that gets room first', actSince(t0).some((e) => e.kind === 'wait' && e.toLabel === lbl('eve')))
+    autoLib.mark(TEST_ROOT, 'log-n', { resetAt: Date.now() - 61e3 })
+    usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [{ kind: 'session', percent: 100, resets_at: new Date(Date.now() - 61e3).toISOString() }, { kind: 'weekly_all', percent: 10, resets_at: inHours(100) }] }, Date.now())
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('log-n') === 'sent', 60000)
+    const wsw = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'autocontinue')
+    check('and the switch that follows says it waited, and that your list chose', !!wsw && wsw.waited === true && wsw.pick === 'order' && wsw.to === 'eve', JSON.stringify(wsw))
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-m', Date.now() + 3 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    autoLib.mark(TEST_ROOT, 'log-m', { resetAt: Date.now() - 61e3 })
+    addToChat([{ type: 'user', timestamp: new Date().toISOString(), permissionMode: 'auto', message: { role: 'user', content: 'carry on' } }])
+    await ext._test.checkLimits()
+    check('a chat that carried on by itself is logged as such', actSince(t0).some((e) => e.kind === 'waitend' && e.how === 'moved'))
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'], early: 80 })
+    liveUsage(85, 20); eveUsage(10, 20); freshEarly()
+    t0 = Date.now()
+    ext._test.earlySwitchCheck()
+    await waitFor(() => profiles.activeProfile(TEST_ROOT) === 'eve', 60000)
+    const eE = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'early')
+    check('an early switch says the account\'s use, the share the person set, and the target\'s room; nobody asked',
+      !!eE && eE.limit === 'session' && eE.fromUsed === 85 && eE.threshold === 80 && eE.toUsed === 10 && !eE.asked && eE.from === logHome, JSON.stringify(eE))
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+    store.setAutoContinue(TEST_ROOT, { mode: 'ask' })
+    liveUsage(86, 20); freshEarly()
+    t0 = Date.now()
+    q.info.push('Switch Now', 'Switch Back')
+    ext._test.earlySwitchCheck()
+    await waitFor(() => actSince(t0).some((e) => e.by === 'switchback'), 60000)
+    const e2 = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'early')
+    check('Ask mode: pressing Switch Now is logged as the person\'s choice, not automatic', !!e2 && e2.asked === true, JSON.stringify(e2))
+    check('and Switch Back is logged as the person\'s own switch back', actSince(t0).some((e) => e.kind === 'switch' && e.by === 'switchback' && e.to === logHome))
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'], early: null })
+
+    t0 = Date.now()
+    await require('../lib/switch.js').switchAccount(TEST_ROOT, 'eve', {})
+    const hb = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'hub')
+    check('a switch by another program (Awaydesk) is logged with from and to', !!hb && hb.from === logHome && hb.to === 'eve' && hb.toLabel === lbl('eve'), JSON.stringify(hb))
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+    t0 = Date.now()
+    profiles.apply(TEST_ROOT, 'eve')
+    ext._test.refreshContext()
+    ext._test.refreshContext()
+    check('a change from outside is noticed and logged once, as noticed and not done by the Switcher',
+      actSince(t0).filter((e) => e.kind === 'switch' && e.by === 'seen' && e.to === 'eve').length === 1)
+    await ext._test.onPageMessage({ type: 'switch', name: logHome })
+
+    t0 = Date.now()
+    const phoneRec = (text, secs) => ({ type: 'user', isMeta: true, uuid: 'ph-' + secs, timestamp: ago(secs), origin: { kind: 'peer', name: 'Awaydesk',
+      body: text + '\n\n(Typed by the user on their phone and sent through Awaydesk, their own app on this PC.)' }, message: { content: 'Another Claude session sent a message' } })
+    writeChat(startOf())
+    addToChat([phoneRec('Did the tests pass after your last change?', 120)])
+    ext._test.resetPhoneScan(); ext._test.refreshContext()
+    ext._test.resetPhoneScan(); ext._test.refreshContext()
+    let ph = actSince(t0 - 3 * 60e3).filter((e) => e.kind === 'phone')
+    check('a message from the phone is logged once, with the chat and its first words', ph.length === 1 && ph[0].count === 1 && ph[0].chat === 'Fix the tests' &&
+      ph[0].preview === 'Did the tests pass after your last change?' && ph[0].chatId === LSID, JSON.stringify(ph))
+    addToChat([phoneRec('Looks good', 60)])
+    ext._test.refreshContext()
+    ph = actSince(t0 - 3 * 60e3).filter((e) => e.kind === 'phone')
+    check('the next one to that chat joins it: two messages, the first one\'s words', ph.length === 1 && ph[0].count === 2 && ph[0].preview.startsWith('Did the tests'), JSON.stringify(ph))
+    addToChat([{ type: 'user', isMeta: true, uuid: 'ph-sw', timestamp: ago(30), origin: { kind: 'peer', name: 'Switcher for Claude Code', body: autoLib.noticeFor({ kind: 'session' }, 'reset') }, message: { content: 'x' } }])
+    ext._test.refreshContext()
+    check('the Switcher\'s own notice to the chat is not counted as the phone', actSince(t0 - 3 * 60e3).filter((e) => e.kind === 'phone')[0].count === 2)
+
+    const execMark = executed.length
+    await ext._test.onPageMessage({ type: 'openChat', id: LSID })
+    check('Open chat on an entry opens that chat in the editor', executed.slice(execMark).some((x) => x.id === 'claude-vscode.primaryEditor.open' && x.args[0] === LSID))
+    await ext._test.onPageMessage({ type: 'openChat', id: '../../x y' })
+    check('and an id that is not a chat id opens nothing', executed.slice(execMark).length === 1)
+    const failMark = messages.length
+    const exWas = vscode.commands.executeCommand
+    vscode.commands.executeCommand = async () => { throw new Error('no such chat') }
+    await ext._test.onPageMessage({ type: 'openChat', id: LSID })
+    await tick()
+    vscode.commands.executeCommand = exWas
+    check('a chat that can\'t be opened is said plainly', messages.slice(failMark).some((m) => m.startsWith('WARN: Couldn\'t open that chat')))
+
+    const pgst = ext._test.pageState()
+    check('the page state carries how many entries are unseen', typeof pgst.logUnseen === 'number' && pgst.logUnseen > 0, String(pgst.logUnseen))
+    const logPanel = panels[panels.length - 1]
+    const postedBefore = logPanel.webview.posted.length
+    await logPanel.webview.handler({ type: 'logOpen' })
+    const sentLog = logPanel.webview.posted.slice(postedBefore).find((m) => m.type === 'log')
+    check('opening the log sends the entries, newest first, and marks them looked at', !!sentLog && sentLog.entries.length > 5 && sentLog.entries[0].at >= sentLog.entries[1].at &&
+      ext._test.pageState().logUnseen === 0 && !sentLog.entries.some((e) => 'k' in e || 'c' in e))
+    await logPanel.webview.handler({ type: 'logMore', before: sentLog.entries[sentLog.entries.length - 1].id })
+    check('and logMore sends the next older ones', logPanel.webview.posted.slice(postedBefore).some((m) => m.type === 'log' && m.older === true))
+    check('no token, key, email address or path is in the log file after all of it',
+      !/RT-|AT-|accessToken|refreshToken|sk-ant|@example\.com|[A-Za-z]:\\\\/.test(fs.readFileSync(actLib.filePath(TEST_ROOT), 'utf8')))
+
+    vscode.window.state = { focused: true }
+    actLib.clear(TEST_ROOT)
+    t0 = Date.now()
+    actLib.record(TEST_ROOT, { kind: 'keepalive', accountLabel: 'x', ok: true, at: t0 - 2 * 3600e3 }, { key: 'away-ka' })
+    actLib.record(TEST_ROOT, { kind: 'roomagain', accountLabel: 'x', at: t0 - 2 * 3600e3 }, { key: 'away-ra' })
+    actLib.record(TEST_ROOT, { kind: 'stop', chat: 'Away chat', accountLabel: 'x', limit: 'session', at: t0 - 2 * 3600e3 }, { key: 'away-st' })
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: t0 - 3 * 3600e3, told: null }))
+    const awayMark = messages.length
+    ext._test.awayTick()
+    await tick()
+    const aw = messages.slice(awayMark).filter((m) => m.includes('While you were away'))
+    check('coming back after 3 hours: one notice with the summary, in the editor when no page is on screen',
+      aw.length === 1 && /^INFO: While you were away \(3 h\): 1 chat stopped at limits: “Away chat”/.test(aw[0]), aw.join(' | '))
+    check('small things (keep alive, room again) are left out of it', !/Keep alive|room again/.test(aw[0] || ''))
+    check('and it offers the full log', infoButtons.some((b) => b.m.startsWith('While you were away') && b.b.includes('See the full log') && b.b.includes('Dismiss')))
+    ext._test.awayTick()
+    await tick()
+    check('a second window coming back, or the next minute, says nothing more: once for the whole PC', messages.slice(awayMark).filter((m) => m.includes('While you were away')).length === 1)
+    ext._test.setNoticesInPage(true)
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: Date.now() - 3 * 3600e3, told: null }))
+    const pm = logPanel.webview.posted.length
+    ext._test.awayTick()
+    await tick()
+    const awayMsg = logPanel.webview.posted.slice(pm).find((m) => m.type === 'away')
+    ext._test.setNoticesInPage(false)
+    check('with a page on screen, it goes to the page: entries since the absence, small things left out',
+      !!awayMsg && awayMsg.away.entries.some((e) => e.kind === 'stop') && !awayMsg.away.entries.some((e) => e.kind === 'keepalive' || e.kind === 'roomagain') &&
+      typeof awayMsg.away.from === 'number', JSON.stringify(awayMsg && awayMsg.away.entries.length))
+
+    const postedAll = () => panels.reduce((n, p) => n + p.webview.posted.length, 0)
+    const postedSince = (n) => panels.flatMap((p) => p.webview.posted).slice(n)
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+    liveFigures(100); liveSession('idle')
+    const homeWas = profiles.activeProfile(TEST_ROOT)
+    t0 = Date.now()
+    writeChat(startOf().concat([stopRec('log-pw')]))
+    autoLib.claim(TEST_ROOT, { id: 'log-pw', chat: LSID, file: LCHAT, name: 'fake-limits-1', title: 'Fix the tests', account: 'eve', kind: 'session',
+      resetAt: Date.now() - 120e3, pinned: true, stoppedAt: Date.now() - 300e3, old: false, stillRunning: false, permissionMode: null, state: 'waiting' })
+    ext._test.refreshContext()
+    await ext._test.checkLimits()
+    await waitFor(() => stateOf('log-pw') === 'sent', 60000)
+    const pw = actSince(t0).find((e) => e.kind === 'continue' && e.how === 'reset')
+    check('a chat pinned to another account that waited for that account\'s reset names its own account, not the one in use',
+      !!pw && homeWas !== 'eve' && pw.accountLabel === lbl('eve') && profiles.activeProfile(TEST_ROOT) === homeWas, JSON.stringify(pw))
+
+    t0 = Date.now()
+    writeChat(startOf())
+    addToChat([phoneRec('Is it done?', 130)])
+    ext._test.resetPhoneScan(); ext._test.refreshContext()
+    const phones = () => acts().filter((e) => e.kind === 'phone').length
+    const had = phones()
+    await ext._test.onPageMessage({ type: 'logClear' })
+    require('../lib/fsx.js').sleepSync(30)
+    addToChat([{ type: 'assistant', timestamp: ago(1), message: { model: 'claude-opus-5-5', usage: { input_tokens: 10 }, content: [{ type: 'text', text: 'ok' }] } }])
+    ext._test.refreshContext()
+    check('after Clear the log, a phone message still in the chat file is not written back when the chat goes on', had === 1 && phones() === 0, had + ' then ' + phones())
+
+    vscode.window.state = { focused: true }
+    actLib.record(TEST_ROOT, { kind: 'stop', chat: 'Fix', accountLabel: 'x', limit: 'session', at: Date.now() - 2 * 3600e3 }, { key: 'wire-away-1' })
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: Date.now() - 3 * 3600e3, told: null }))
+    let mk = postedAll()
+    q.info.push('See the full log')
+    ext._test.awayTick()
+    await tick(); await tick()
+    const opened = postedSince(mk).filter((m) => m.type === 'away')
+    check('the page opened from the notice is told to go straight to the log screen (open: true) with the summary\'s entries',
+      opened.length >= 1 && opened.every((m) => m.open === true) && opened[0].away.entries.some((e) => e.kind === 'stop'), JSON.stringify(opened.map((m) => [m.type, m.open])))
+    mk = postedAll()
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: Date.now() - 3 * 3600e3, told: null }))
+    ext._test.setNoticesInPage(true)
+    ext._test.awayTick()
+    await tick()
+    ext._test.setNoticesInPage(false)
+    const onPage = postedSince(mk).filter((m) => m.type === 'away')
+    check('with the page already on screen, the summary still goes to it as a card (no open flag)', onPage.length >= 1 && onPage.every((m) => !m.open))
+
+    const stampOf = () => JSON.parse(fs.readFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), 'utf8'))
+    const longAgo = Date.now() - 3 * 3600e3
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: longAgo, told: null }))
+    vscode.window.state = { focused: true, active: false }
+    let am = messages.length
+    ext._test.awayTick()
+    await tick()
+    check('a window in front but not active (the PC locked) does not count as someone there: no summary, the stamp is not refreshed',
+      stampOf().lastFocused === longAgo && !messages.slice(am).some((m) => m.includes('While you were away')))
+    vscode.window.state = { focused: true, active: true }
+    q.info.push(undefined)
+    ext._test.awayTick()
+    await tick()
+    check('and when the person is active again, the summary comes', messages.slice(am).some((m) => m.includes('While you were away')) && stampOf().lastFocused > longAgo)
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: longAgo, told: null }))
+    vscode.window.state = { focused: true }
+    ext._test.awayTick()
+    check('an editor that does not say whether the person is active (no "active") is read by focus alone, as before', stampOf().lastFocused > longAgo)
+    vscode.window.state = { focused: false, active: true }
+    fs.writeFileSync(path.join(TEST_ROOT, actLib.AWAY_FILE), JSON.stringify({ lastFocused: longAgo, told: null }))
+    ext._test.awayTick()
+    check('a window not in front never counts', stampOf().lastFocused === longAgo)
+    vscode.window.state = { focused: true }
+
+    ext._test.setNoticesInPage(true)
+    const lp = panels[panels.length - 1]
+    await lp.webview.handler({ type: 'logOpen' })
+    store.setAutoContinue(TEST_ROOT, { mode: 'wait' })
+    mk = postedAll()
+    writeChat(startOf().concat([stopRec('log-dot1', Date.now() + 3 * 3600e3)]))
+    ext._test.refreshContext()
+    q.info.push(undefined)
+    await ext._test.checkLimits()
+    check('an entry that arrives while the log screen is open is shown there and is not counted for the dot',
+      postedSince(mk).some((m) => m.type === 'log') && ext._test.pageState().logUnseen === 0, 'unseen ' + ext._test.pageState().logUnseen)
+    await lp.webview.handler({ type: 'logClose' })
+    mk = postedAll()
+    await ext._test.onPageMessage({ type: 'cancelContinue', id: 'log-dot1' })
+    check('once the log screen is closed the page is not sent the log again with each entry, and the entry counts for the dot',
+      !postedSince(mk).some((m) => m.type === 'log') && ext._test.pageState().logUnseen === 1, 'unseen ' + ext._test.pageState().logUnseen)
+    ext._test.setNoticesInPage(false)
+
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'], early: 80 })
+    liveUsage(10, 97); eveUsage(5, 30); freshEarly()
+    t0 = Date.now()
+    ext._test.earlySwitchCheck()
+    await waitFor(() => profiles.activeProfile(TEST_ROOT) === 'eve', 60000)
+    const we = actSince(t0).find((e) => e.kind === 'switch' && e.by === 'early')
+    check('an early switch for the weekly limit gives the new account\'s weekly figure (not its 5-hour one)', !!we && we.limit === 'weekly' && we.toUsed === 30, JSON.stringify(we))
+    await ext._test.onPageMessage({ type: 'switch', name: homeWas })
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'], early: null })
+
+    {
+      const cp = require('child_process')
+      const locksLib = require('../lib/locks.js')
+      const fsx = require('../lib/fsx.js')
+      const sw = require('../lib/switch.js')
+      const kid = cp.spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 30000)'], { stdio: 'ignore' })
+      const lf = locksLib.lockPath(TEST_ROOT, 'activity')
+      fs.mkdirSync(path.dirname(lf), { recursive: true })
+      fs.writeFileSync(lf, JSON.stringify({ pid: kid.pid, token: 'x', at: Date.now() }))
+      fs.rmSync(lf, { force: true })
+      const tb = Date.now()
+      await sw.switchAccount(TEST_ROOT, 'eve', {})
+      const base = Date.now() - tb
+      await sw.switchAccount(TEST_ROOT, homeWas, {})
+      fs.writeFileSync(lf, JSON.stringify({ pid: kid.pid, token: 'x', at: Date.now() }))
+      let liveWhenLogged = null
+      const realRecord = actLib.record
+      actLib.record = (...a) => { liveWhenLogged = (store.getLiveLog(TEST_ROOT).slice(-1)[0] || {}).name; return realRecord(...a) }
+      t0 = Date.now()
+      const t1 = Date.now()
+      const res = await sw.switchAccount(TEST_ROOT, 'eve', {})
+      const took = Date.now() - t1
+      actLib.record = realRecord
+      check('with the log\'s lock held by another program, a switch still completes quickly (the log waits well under a second)', res.switched === true && took < base + 900, took + ' ms against ' + base + ' ms with the lock free')
+      check('the switch\'s entry is written after the registry has recorded the switch', liveWhenLogged === 'eve', String(liveWhenLogged))
+      check('the entry waits in memory while the lock is busy', !acts().some((e) => e.at >= t1 && e.kind === 'switch' && e.by === 'hub'))
+      fs.rmSync(lf, { force: true })
+      kid.kill()
+      fsx.sleepSync(2100)
+      check('and is written when the lock is free: the log\'s next write or the timer (flush) puts it in', actLib.flush(TEST_ROOT) === true && acts().some((e) => e.at >= t1 && e.kind === 'switch' && e.by === 'hub' && e.to === 'eve'))
+      await ext._test.onPageMessage({ type: 'switch', name: homeWas })
+    }
+
+    vscode.window.state = undefined
+    store.setAutoContinue(TEST_ROOT, { mode: 'switch', pick: 'order', order: ['eve'], early: null })
+    ext._test.setHandoffRun(null)
+    fs.rmSync(LPROJ, { recursive: true, force: true })
+    fs.rmSync(LREC, { force: true })
+  }
+
   console.log('\n-- keep alive --')
   check('off for every account at first', ext._test.pageState().accounts.every((a) => a.keepAlive === false))
   await ext._test.onPageMessage({ type: 'keepAlive', name: 'eve', on: true })
@@ -1409,6 +1763,7 @@ async function main() {
   check('when its 5-hour window has ended, it gets a "hi" to start the next one', kept.length === 1)
   await ext._test.keepAliveTick()
   check('only once, however often it checks', kept.length === 1)
+  check('keep alive is logged once, with the account and that it worked', actLib.list(TEST_ROOT, { limit: 500 }).entries.filter((e) => e.kind === 'keepalive' && e.ok === true && e.accountLabel === 'eve').length === 1)
   autoLib.updateState(TEST_ROOT, (st) => { st.keepAlive.eve = 0 })
   usageLib.writeCacheForKey(TEST_ROOT, 'uuid-eve', { limits: [
     { kind: 'session', percent: 3, resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
@@ -1813,6 +2168,59 @@ async function main() {
       await ext._test.onPageMessage({ type: 'whatsNewChoice', choice: 'close' })
       check('closed, it is gone for that version, for the whole PC', ext._test.pageState().whatsNew === null &&
         JSON.parse(fs.readFileSync(updFile, 'utf8')).seen === '1.4.0')
+    }
+
+    console.log('\n-- 1.5.4: the phone button --')
+    {
+      const awFile = path.join(TEST_ROOT, 'awaydesk.json')
+      fs.rmSync(awFile, { force: true })
+      ext._test.clearPhoneMemory()
+      const asked = []
+      let listedNow = false
+      ext._test.setPhoneRequest(async (o) => { asked.push(o); return listedNow ? { status: 200, body: JSON.stringify({ results: [{ extensions: [{ publisher: { publisherName: 'clumsyboss' }, extensionName: 'awaydesk' }] }] }) }
+        : { status: 200, body: JSON.stringify({ results: [{ extensions: [] }] }) } })
+      ext._test.setPhonePlatform('win32', 'Visual Studio Code')
+      const mode = () => ext._test.pageState().phone
+      check('the page always gets the phone state, and building it asks nothing', mode() && mode().mode === 'soon' && asked.length === 0, JSON.stringify(mode()))
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('opening the pop-up on Windows asks the Marketplace once; not in it yet is Coming soon', asked.length === 1 && asked[0].store === 'marketplace' && mode().mode === 'soon' && mode().checking === false)
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('a second opening the same day asks nothing', asked.length === 1)
+      const ranBefore = executed.length
+      await ext._test.onPageMessage({ type: 'phoneAction' })
+      check('Coming soon has no action: nothing runs', executed.length === ranBefore)
+      listedNow = true
+      fs.rmSync(awFile, { force: true })
+      ext._test.clearPhoneMemory()
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('once the store has it, the pop-up offers Get Awaydesk', mode().mode === 'get', JSON.stringify(mode()))
+      await ext._test.onPageMessage({ type: 'phoneAction' })
+      check('Get Awaydesk opens it in the Extensions view', executed.slice(-1)[0].id === 'extension.open' && executed.slice(-1)[0].args[0] === 'clumsyboss.awaydesk', JSON.stringify(executed.slice(-1)))
+      settings.claudeswitcher.checkForUpdates = false
+      check('with Check for Updates off, even a saved "in the store" says Coming soon', mode().mode === 'soon')
+      fs.rmSync(awFile, { force: true })
+      ext._test.clearPhoneMemory()
+      const askedBefore = asked.length
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('and nothing is asked', asked.length === askedBefore)
+      delete settings.claudeswitcher.checkForUpdates
+      vscode.extensions = { getExtension: (id) => (id === 'clumsyboss.awaydesk' ? { id } : undefined) }
+      check('with Awaydesk installed the pop-up offers Connect a phone', mode().mode === 'connect')
+      await ext._test.onPageMessage({ type: 'phoneAction' })
+      check('and it runs awaydesk.pair', executed.slice(-1)[0].id === 'awaydesk.pair', JSON.stringify(executed.slice(-1)))
+      delete vscode.extensions
+      ext._test.setPhonePlatform('darwin', 'Cursor')
+      fs.rmSync(awFile, { force: true })
+      ext._test.clearPhoneMemory()
+      const askedMac = asked.length
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('on a Mac it says Coming to Mac and Linux later, and asks no store', mode().mode === 'other' && asked.length === askedMac)
+      ext._test.setPhonePlatform('win32', 'Cursor')
+      await ext._test.onPageMessage({ type: 'phoneOpen' })
+      check('Cursor asks Open VSX, not the Marketplace', asked.slice(-1)[0].store === 'openvsx')
+      ext._test.setPhonePlatform(null, null)
+      ext._test.setPhoneRequest(null)
+      fs.rmSync(awFile, { force: true })
     }
 
     console.log('\n-- 1.4: switching to another organization --')
@@ -2452,6 +2860,7 @@ async function main() {
     check('then the logins swap: main has the long one', Math.abs(daysOf(profiles.readMeta(TEST_ROOT, 'finn').loginExpiresAt) - 30.5) < 0.1)
     check('and pinning the short one', Math.abs(daysOf(loginsLib.readMeta(TEST_ROOT, 'finn').expiresAt) - 0.5) < 0.1)
     check('with a notice afterwards', messages.some((m) => /^INFO: Finn's main login was on its last day, so it quietly swapped places/.test(m)))
+    check('the last-day swap is logged with the account', actLib.list(TEST_ROOT, { limit: 500 }).entries.some((e) => e.kind === 'lastday' && e.accountLabel === 'Finn'))
     check('the wrapper list has the new pinning end date', wrapperList().split('\n').some((l) => {
       const [k, n, at] = l.split('\t')
       return k === 'login' && n === 'finn' && Math.abs(daysOf(Number(at)) - 0.5) < 0.1

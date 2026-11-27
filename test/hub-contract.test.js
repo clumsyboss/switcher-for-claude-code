@@ -175,6 +175,28 @@ async function main() {
   check('requests.alive lists a running window: [{pid, at, version}]', win.length === 1 && win[0].pid === process.pid && typeof win[0].at === 'number' && win[0].version === '1.5.0', JSON.stringify(win))
   requests.unbeat(ROOT)
 
+  console.log('\n-- the marker on a message from the phone, as the activity log reads it --')
+  const activity = require(path.join(LIB, 'activity.js'))
+  const typed = (n) => 'Typed by the user on their phone and sent through ' + n + ', their own app on this PC.'
+  const scheduled = (n) => 'Scheduled earlier by the user on their phone, and sent at the time they picked by ' + n + ', their own app on this PC.'
+  check('the typed marker, under the name now and the two earlier ones', ['Awaydesk', 'Remote CC Hub', 'Claude Hub'].every((n) => activity.PHONE_MARKS.includes(typed(n))))
+  check('the scheduled marker, under the same names', ['Awaydesk', 'Remote CC Hub', 'Claude Hub'].every((n) => activity.PHONE_MARKS.includes(scheduled(n))))
+  check('and no other marker is expected', activity.PHONE_MARKS.length === 6)
+  check('the oldest form, the mark at the start', activity.PHONE_OLD_MARK === 'Typed by the user on their phone, sent through Claude Hub (their own app on this PC):')
+  const sent = (body) => ({ type: 'user', isMeta: true, uuid: 'u1', timestamp: new Date().toISOString(), origin: { kind: 'peer', name: 'Awaydesk', body } })
+  check('a message as Awaydesk sends it (the text, a blank line, the marker in brackets) is found, with only the user\'s words',
+    (activity.phoneIn(sent('Run the tests\n\n(' + typed('Awaydesk') + ')')) || {}).words === 'Run the tests')
+  check('and one sent while Claude was busy, as a queued command, too', (activity.phoneIn({ type: 'attachment', uuid: 'q1', timestamp: new Date().toISOString(),
+    attachment: { type: 'queued_command', origin: { kind: 'peer', name: 'Awaydesk', body: 'Go\n\n(' + scheduled('Awaydesk') + ')' } } }) || {}).words === 'Go')
+
+  check('the heading Awaydesk puts before the files it saved', activity.FILES_HEAD === 'Attached from the phone (saved on this PC):')
+  const bs = String.fromCharCode(92)
+  const upload = ['C:', 'Users', 'John Smith', '.claude-hub', 'uploads', '0a1b2c3d-1111-2222-3333-444455556666', 'IMG_2041.png'].join(bs)
+  const filesNote = 'Attached from the phone (saved on this PC):\n- ' + upload
+  check('a photo sent without words reads "a photo from your phone", never the note or a part of the path',
+    (activity.phoneIn(sent(filesNote + '\n\n(' + typed('Awaydesk') + ')')) || {}).words === 'a photo from your phone')
+  check('a photo with words keeps the words alone', (activity.phoneIn(sent('Look at this\n\n' + filesNote + '\n\n(' + typed('Awaydesk') + ')')) || {}).words === 'Look at this')
+
   fs.rmSync(ROOT, { recursive: true, force: true })
   console.log('\n' + pass + ' passed, ' + fail + ' failed')
   if (fail) process.exit(1)
